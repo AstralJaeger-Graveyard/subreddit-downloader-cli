@@ -1,174 +1,217 @@
 import asyncio
-import shutil
-import tempfile
-from datetime import datetime, timedelta
+import math
 import os
 import os.path
-import sys
 import platform
-import mimetypes
-import hashlib
-from tempfile import SpooledTemporaryFile
+import sys
+import time
+import traceback
+from datetime import datetime, timedelta
+from glob import glob
+from urllib.parse import urlparse
 
-from sentry_sdk import init as sentry_init, start_span, start_transaction, set_tag, set_user, set_extra, set_level, set_context
 import asyncpraw
-import requests
-from colorama import init, Fore, Back, Style
+from colorama import init
+from requests import HTTPError
 
-sentry_init(
-    dsn="https://3b39db99682e4801885ee7db3f28f802@o1319955.ingest.sentry.io/4504361285844992",
-    traces_sample_rate=1.0,
-)
+from downloaders import *
+from urlresolvers import StandardUrlResolver
+from environment import ensure_environment
+from environmentlabels import *
 
+# Constants
+VERSION = "0.2.0"
 HEADERS = 96
-LIMIT = 10000
-TMP = os.environ["TEMP_LOC"]
-os.makedirs(TMP, exist_ok=True)
+LIMIT = 1000
+EARLY_ABORT = 3 * math.ceil(math.log10(LIMIT))   # Early abort for refresh-mode
+
+# Important environment
+generic_downloader = GenericDownloader()
+used_downloaders = [
+    generic_downloader,
+    RedditDownloader(),
+    RedgifsDownloader(),
+    ImgurDownloader()
+]
+
+env = ensure_environment(used_downloaders)
+temp_dir = env[TEMP_LOCATION]
+os.makedirs(temp_dir, exist_ok=True)
+data_dir = env[DATA_LOCATION]
+os.makedirs(data_dir, exist_ok=True)
+downloader_registry: dict[Pattern, BaseDownloader] = {}
+
+# Initialize downloaders with environment
+for downloader in used_downloaders:
+    downloader.init(env)
+    print(f"> {Fore.BLUE}{downloader.__class__.__name__}{Fore.RESET} supports {len(downloader.get_supported_domains())} providers")
+    for host_pattern in downloader.get_supported_domains():
+        downloader_registry[host_pattern] = downloader
+
+stats: dict[str, int] = {}
 
 
-async def generic_download(url: str, target: str) -> str:
-    with start_span(op="generic_download", description="Download file from unknown source") as span:
-        span.set_tag("req.host", url)
-        with requests.get(url, stream=True) as req:
-            span.set_tag("request.status_code", req.status_code)
-            span.set_tag("request.content_type", req.headers["content-type"])
-            span.set_tag("request.length", len(req.content))
-            req.raise_for_status()
-
-            # ext alreaady has the dot
-            ext = mimetypes.guess_extension(req.headers["content-type"])
-            if ext is None:
-                return f"{Fore.YELLOW}No supported content found CT: {req.headers['content-type']}{Fore.RESET}"
-
-            with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir=TMP) as tmp_file:
-                shagen = hashlib.sha256()
-                for chunk in req.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
-                    shagen.update(chunk)
-                tmp_file.seek(0)
-                hex_digest = shagen.hexdigest()
-                filepath = os.path.join(target, f"{hex_digest}{ext}")
-                if not os.path.exists(filepath):
-                    with open(filepath, "wb") as persistent_file:
-                        shutil.copyfileobj(tmp_file, persistent_file)
-                span.set_tag("file_hash", hex_digest)
-                return hex_digest
+def acoustic_alert():
+    if platform.system() == 'Windows':
+        import winsound
+        duration = 1000  # milliseconds
+        freq = 440  # Hz
+        winsound.Beep(freq, duration)
 
 
-async def redgifs_download(url: str, target: str) -> str:
-    with start_span(op="redgifs_download", description="Download file from redgifs") as span:
-        try:
-            span.set_tag("req.host", url)
-            content_id = url.split('/watch/', 1)[1]
-        except IndexError:
-            print(f"  Failed with url: {Fore.GREEN}{url}{Fore.RESET} | {url.split('/watch/', 1)}")
-            return ""
-
-        session = requests.Session()
-        req = session.get("https://api.redgifs.com/v2/auth/temporary")
-        if req.status_code != 200:
-            return ""
-
-        auth_json = req.json()
-        token = auth_json["token"]
-        headers = {
-            "Authorization": f"Bearer {token}"
-        }
-
-        req = session.get(f"https://api.redgifs.com/v2/gifs/{content_id}", headers=headers)
-        if req.status_code != 200:
-            return ""
-
-        raw = req.json()
-        content_url = raw["gif"]["urls"]["hd"]
-
-        with session.get(content_url, headers=headers, stream=True) as req:
-            span.set_tag("request.status_code", req.status_code)
-            span.set_tag("request.content_type", req.headers["content-type"])
-            span.set_tag("request.length", len(req.content))
-            req.raise_for_status()
-            # ext alreaady has the dot
-            ext = mimetypes.guess_extension(req.headers["content-type"])
-            if ext is None:
-                return "No supported content found"
-
-            with tempfile.SpooledTemporaryFile(512*1025*1024, "wb", dir=TMP) as tmp_file:
-                shagen = hashlib.sha256()
-                for chunk in req.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
-                    shagen.update(chunk)
-                tmp_file.seek(0)
-                hex_digest = shagen.hexdigest()
-                filepath = os.path.join(target, f"{hex_digest}{ext}")
-                if not os.path.exists(filepath):
-                    with open(filepath, "wb") as persistent_file:
-                        shutil.copyfileobj(tmp_file, persistent_file)
-                span.set_tag("file_hash", hex_digest)
-                return hex_digest
-
-
-# TODO: Add imgur support
 async def download(url: str, target: str) -> str:
-    with start_transaction(op="download", name=url):
-        if "redgifs" in url:
-            return await redgifs_download(url, target)
-        if "imgur" in url:
-            return f"{Fore.RED}Imgur is not supported{Fore.RESET}"
-        elif "pximg" in url:
-            return f"{Fore.RED}Pixiv is not supported{Fore.RED}"
-        elif "discordapp" in url:
-            return f"{Fore.RED}Discord CDN is not supported{Fore.RED}"
-        else:
+
+    result = urlparse(url)
+    urlpath = None
+    if urlpath and not result.path == "":
+        urlpath = result.path.split("/")[0]
+    match_str = f"{result.hostname}/{urlpath}" if urlpath else result.hostname
+
+    # Count used hosts
+    if match_str in stats.keys():
+        stats[match_str] = stats[match_str] + 1
+    else:
+        stats[match_str] = 1
+
+    for provider in downloader_registry.keys():
+        if re.match(provider, match_str):
             try:
-                return await generic_download(url, target)
-            except requests.exceptions.RequestException:
-                return f"{Fore.RED}Generic download exception ocurred at host:{Fore.RED} {url}"
+                return await downloader_registry[provider].download(url, target)
+            except HTTPError as httperror:
+                return f"{Fore.RED}{httperror.__class__.__name__} {httperror} for {result.hostname}{Fore.RESET}"
+            except Exception as error:
+                acoustic_alert()
+                print(f"{' ' * 18} {error}")
+                traceback.print_exception(error)
+                return f"{Fore.RED}{error.__class__.__name__} {error.code if hasattr(error, 'code') else '-'} for {result.hostname}{Fore.RESET}"
+
+    return f"{Fore.YELLOW}No downloader for \'{match_str}\'{Fore.RESET}"
+
+
+async def cleanup(data_dir: str, temp_dir) -> None:
+    print(f"> {Fore.BLUE}Cleaning up folder{Fore.RESET}  : {data_dir}")
+    print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
+    print("=" * HEADERS)
+    dup_map: dict[int, str] = dict()
+    for path, subdirs, files in os.walk(data_dir):
+        for name in files:
+            name_path = os.path.join(path, name)
+            hex_key = int(name.split(".")[0], 16)
+            if hex_key in dup_map:
+                print(f" - Found duplicate file: {Fore.YELLOW}{name_path}{Fore.RESET} - {Fore.YELLOW}{dup_map[hex_key]}{Fore.RESET}")
+                if name_path[0:name_path.rfind("/")] == dup_map[hex_key]:
+                    os.unlink(name_path)
+            else:
+                dup_map[hex_key] = name_path
+            if ".." in name:
+                print(f" - Renaming malformed file: {Fore.YELLOW}{name}{Fore.RESET} - {Fore.YELLOW}{name.replace('..', '.')}{Fore.RESET}")
+                os.rename(os.path.join(path, name), os.path.join(path, name.replace("..", ".")))
+    print(f"Dupmap contained {len(dup_map)} elements")
 
 
 async def main(args: list[str]):
 
     print("=" * HEADERS)
-    print(f"{Fore.MAGENTA}Subreddit CLI Downloader{Fore.RESET} V0.1.0".center(HEADERS))
+    print(f"{Fore.MAGENTA}Subreddit CLI Downloader{Fore.RESET} V{VERSION}".center(HEADERS))
+    print(f"Application startup successful, environment loaded".center(HEADERS))
     print("=" * HEADERS)
     print("")
 
-
     reddit = asyncpraw.Reddit(
-        client_id=os.environ["CLIENT_ID"],
-        client_secret=os.environ["CLIENT_SECRET"],
-        user_agent=f"{platform.platform()}:SR-Downloader-CLI:0.1.0 (by u/97hilfel)",
-        username=os.environ["USERNAME"],
-        password=os.environ["PASSWORD"]
+        client_id=env[REDDIT_CLIENT_ID],
+        client_secret=env[REDDIT_CLIENT_SECRET],
+        username=env[REDDIT_USER],
+        password=env[REDDIT_PASSWORD],
+        user_agent=f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
     )
 
-    subreddit_name = args[1]
-    subreddit = await reddit.subreddit(subreddit_name)
+    # Add check if no subreddit name is given
+    subreddit_names = args[1:]
+    refresh_mode = False
 
-    target_folder = f"ws-{subreddit.display_name}"
-    target = os.path.join(os.environ["DATA_LOC"], target_folder)
-    os.makedirs(target, exist_ok=True)
-    print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target}")
-    print(f"> {Fore.BLUE}Args{Fore.RESET}: {args}")
-    print(f"> {Fore.BLUE}Subreddit{Fore.RESET}: r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
-    print(f"> {Fore.BLUE}Limit{Fore.RESET}: {LIMIT}")
+    if len(subreddit_names) == 0:
+        print(f"No subreddit names passed, looking for existing resources and refreshing existing resources")
+        existing = glob(os.path.join(data_dir, "ws-*"))
+        subreddit_names = [srn.split(os.sep)[-1].replace("ws-", "") for srn in existing]
+        refresh_mode = True
 
-    idx: int = 1
-    async for submission in subreddit.new(limit=LIMIT):
-        await submission.load()
-        score_color = Fore.GREEN if submission.score > 0 else Fore.RED
-        created = datetime.fromtimestamp(submission.created_utc)
-        hash = ""
-        if not submission.is_self:
-            hash = await download(submission.url, target)
-        print(f" - {Fore.BLUE}{idx:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] <{created}> {submission.title} [{hash}]")
-        idx += 1
+    if len(subreddit_names) > 1:
+        print(f"Downloading multiple: {os.linesep}    - {Fore.RED}{f'{os.linesep}{Fore.RESET}    - {Fore.RED}'.join(sorted(subreddit_names))}{Fore.RESET}")
+
+    for major, subreddit_name in enumerate(sorted(subreddit_names), 1):
+        duplicate_count = 0
+        subreddit = await reddit.subreddit(subreddit_name)
+        target_dir = os.path.join(data_dir, f"ws-{subreddit.display_name.lower()}")
+        os.makedirs(target_dir, exist_ok=True)
+
+        print("=" * HEADERS)
+        print(f"> {Fore.BLUE}Data folder{Fore.RESET}  : {data_dir}")
+        print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
+        print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target_dir}")
+        print(f"> {Fore.BLUE}Subreddit{Fore.RESET}    : r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
+        print(f"> {Fore.BLUE}Limit{Fore.RESET}: {LIMIT}")
+        if refresh_mode:
+            print(f"> {Fore.BLUE}Early abort limit{Fore.RESET}: {EARLY_ABORT}")
+        print("=" * HEADERS + "\n")
+
+        idx: int = 0
+        async for submission in subreddit.new(limit=LIMIT):
+            await submission.load()
+            score_color = Fore.GREEN if submission.score > 0 else Fore.RED
+            created = datetime.fromtimestamp(submission.created_utc)
+
+            urls = StandardUrlResolver().resolve(submission)
+
+            idx += 1
+            for url in urls:
+                hex_digest = await download(url, target_dir)
+
+                if hex_digest is None:
+                    hex_digest = f"{Fore.RED}HEX DIGEST IS NONE{Fore.RESET}"
+
+                if len(urls) > 1:
+                    hex_digest = f"{Fore.BLUE}GALLERY{Fore.RESET} {hex_digest}"
+
+                if "duplicate" in hex_digest.lower():
+                    duplicate_count = duplicate_count + 1
+
+                if not refresh_mode:
+                    print(f" - {Fore.BLUE}{idx:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] <{created}> {submission.title} [{hex_digest}]")
+                else:
+                    print(f" - {Fore.BLUE}{major:3}{Fore.RESET}.{Fore.BLUE}{idx:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] <{created}> {submission.title} [{hex_digest}]")
+
+                if "no downloader" in hex_digest.lower():
+                    print(f"{' ' * 18} URL: {submission.url}")
+                if refresh_mode and duplicate_count > EARLY_ABORT:
+                    break
 
     await reddit.close()
 
+    print("=" * HEADERS)
+    total_calls = sum(stats.values())
+    print(f"Used providers and cdn's over {total_calls} attempted downloads:")
+
+    for key, value in reversed(sorted(stats.items(), key=lambda item: item[1])):
+        color = Fore.GREEN if any(pattern.match(key) for pattern in downloader_registry.keys()) else Fore.RED
+        print(f" - {Fore.BLUE}{key:>32}{Fore.RESET}: {value:4}  <{color}{round(value / total_calls * 10_000) / 100:4.1f}%{Fore.RESET}>")
+    print("=" * HEADERS)
+    await cleanup(data_dir, temp_dir)
+    acoustic_alert()
+
+
 if __name__ == "__main__":
-    import time
-    init()
     start = time.perf_counter()
-    asyncio.run(main(sys.argv))
+    try:
+        init()
+        asyncio.run(main(sys.argv))
+    except KeyboardInterrupt:
+        print(f"{Fore.RED}Stopped by keyboard interrupt{Fore.RESET}")
+    except Exception as excep:
+        print(f"{Fore.RED}Stopped by {excep.__class__.__name__}{Fore.RESET}")
+        print(excep)
+
+    for downloader in downloader_registry.values():
+        downloader.close()
+
     elapsed = time.perf_counter() - start
     print(f"{Fore.BLUE}{__file__}{Fore.RESET} executed in {Fore.BLUE}{timedelta(seconds=elapsed)}{Fore.RESET} seconds.")
