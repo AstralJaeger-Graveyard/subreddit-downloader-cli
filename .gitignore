@@ -1,3 +1,6 @@
+# MacOs File system
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -131,3 +134,6 @@ dmypy.json
 # IDE files
 .idea/
 .code-workspace
+
+# Application specific
+data/
