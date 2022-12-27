@@ -14,7 +14,7 @@ In order to start the script the following requirements must be met:
    - ``data_location``: Location for files
    - ``reddit_cid``: Your reddit application client id 
    - ``reddit_cs``: Your reddit client secret 
-   - ``reddit_user``: Your reddit username 
-   - ``reddit_password``: Your reddit password
-   - ``-``: -
-   - ``-``: -
+   - ``imgur_cid``: Imgur Client ID
+3. Run application with ``python main.py subreddit [subreddit ...]``
+4. The application will tell you if environment variables are missing
+
