@@ -23,10 +23,6 @@ class DuplicateFileException(Exception):
     pass
 
 
-class NoFileException(Exception):
-    pass
-
-
 class NoDownloaderException(Exception):
     pass
 
@@ -37,10 +33,12 @@ class BaseDownloader:
     """
 
     def __init__(self):
+        self.no_op = False
         self.environment: dict[str, str] = {}
         pass
 
-    def init(self, environment: dict[str, str]) -> None:
+    def init(self, environment: dict[str, str], no_op: bool = False) -> None:
+        self.no_op = no_op
         self.environment = environment
 
     def get_supported_domains(self) -> list[Pattern]:
@@ -73,12 +71,13 @@ class BaseDownloader:
             if ext is None:
                 return digest, None
 
+            ext.replace(".", "")
             filepath = Path(target, f"{digest}.{ext}")
             if path.exists(filepath):
                 return "", None
-
-            with filepath.open("wb") as persistent_file:
-                shutil.copyfileobj(tmp_file, persistent_file)
+            if not self.no_op:
+                with filepath.open("wb") as persistent_file:
+                    shutil.copyfileobj(tmp_file, persistent_file)
             return digest, filepath
 
     def close(self) -> None:
@@ -91,14 +90,17 @@ class GenericDownloader(BaseDownloader):
     """
 
     def __init__(self):
-        BaseDownloader.__init__(self)
+        super().__init__()
 
     def get_supported_domains(self) -> list[Pattern]:
         return [
-            re.compile(r"^(i\.)?ibb\.co"),
+            re.compile(r"^(wimg\.)rule34\.xxx"),
             re.compile(r"^d\.furaffinity\.net"),
             re.compile(r"^(static\d\.)?e621\.net"),
-            re.compile(r"^(w\.)?wallhaven\.cc")
+            re.compile(r"^(w\.)?wallhaven\.cc"),
+            re.compile(r"^(i\.)?ibb\.co"),
+            re.compile(r"(scontent\.)?(fbne\d-\d\.)?(fna\.)fbcdn.net"),  # Facebook CDN
+            re.compile(r"(i\.)?pinimg.com")  # Pinterest CDN
         ]
 
     def get_required_env(self) -> list[Pattern]:
@@ -107,7 +109,7 @@ class GenericDownloader(BaseDownloader):
     async def download(self, url, target) -> (str, Path):
         with requests.get(url) as response:
             response.raise_for_status()
-            return BaseDownloader.save_to_disk(self, response, target)
+            return super().save_to_disk(response, target)
 
 
 class RedditDownloader(BaseDownloader):
@@ -136,12 +138,12 @@ class RedgifsDownloader(BaseDownloader):
     """
 
     def __init__(self):
-        BaseDownloader.__init__(self)
+        super().__init__()
         self.__session = requests.Session()
         self.__auth = {}
 
-    def init(self, environment: dict[str, str]) -> None:
-        BaseDownloader.init(self, environment)
+    def init(self, environment: dict[str, str], no_op: bool = False) -> None:
+        super().init(environment, no_op)
         with self.__session.get("https://api.redgifs.com/v2/auth/temporary") as response:
             response.raise_for_status()
             self.__auth = response.json()
@@ -180,12 +182,12 @@ class ImgurDownloader(BaseDownloader):
     """
 
     def __init__(self):
-        BaseDownloader.__init__(self)
+        super().__init__()
         self.__session = requests.Session()
         self.__auth = {}
 
-    def init(self, environment: dict[str, str]) -> None:
-        BaseDownloader.init(self, environment)
+    def init(self, environment: dict[str, str], no_op: bool = False) -> None:
+        super().init(environment, no_op)
         self.__auth = {
             "Authorization": f"Client-ID {environment[IMGUR_CLIENT_ID]} "
         }
@@ -197,9 +199,9 @@ class ImgurDownloader(BaseDownloader):
         return ["imgur_cid"]
 
     async def download(self, url, target) -> (str, Path):
-
         content_id = self._parse_content_id(url)
-        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers=self.__auth, stream=True) as data_response:
+        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers=self.__auth,
+                                stream=True) as data_response:
             data_response.raise_for_status()
             data = data_response.json()["data"]
             content_link = data["link"]
