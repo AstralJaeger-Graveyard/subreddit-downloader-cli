@@ -1,9 +1,9 @@
 import os
 
-from environmentlabels import *
-from downloaders import BaseDownloader
+from colorama import Fore
 
-from colorama import Fore, Back, Style
+from downloaders import BaseDownloader
+from environmentlabels import *
 
 HEADERS = 96
 
@@ -21,7 +21,7 @@ def ensure_environment(downloaders: list[BaseDownloader]) -> dict[str, str]:
     print(f"Loading environment".center(HEADERS))
 
     # Core Environment:
-    keys = [TEMP_LOCATION, DATA_LOCATION, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER, REDDIT_PASSWORD]
+    keys = [REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET]
     print(f"> Loading {Fore.YELLOW}core{Fore.RESET} environment")
     for key in keys:
         if key not in os.environ.keys() or os.environ[key] == "":
