@@ -33,5 +33,9 @@ class StandardUrlResolver(BaseUrlResolver):
         if not submission.is_self and \
                 not hasattr(submission, "media_metadata") and \
                 "gallery" not in submission.url:
-            urls.add(submission.url)
+            if submission.url.startswith("/r/"):
+                print(f"{' ' * 15} URL {submission.url} for submission {submission.permalink} is malformed")
+                urls.add(f"https://www.reddit.com{submission.url}")
+            else:
+                urls.add(submission.url)
         return urls

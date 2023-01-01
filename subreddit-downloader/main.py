@@ -4,27 +4,21 @@ import math
 import os
 import os.path
 import platform
-import pprint
-import sys
-import threading
-import time
 from datetime import timedelta
 from glob import glob
-from pathlib import PurePath
 
 import asyncpraw
 import ubelt
-import wakepy as wakepy
 import xxhash
 from asyncpraw import Reddit
 from asyncpraw.models import Submission
 from colorama import init
-from requests import HTTPError
 
 from downloaders import *
 from environment import ensure_environment
 from environmentlabels import *
 from urlresolvers import StandardUrlResolver
+from utils import is_sha256, load_dupmap, store_dupmap
 
 # Constants
 VERSION = "0.3.0"
@@ -36,8 +30,9 @@ EARLY_ABORT = max(2 * math.ceil(math.log10(LIMIT)), 1)  # Early abort for refres
 refresh_mode: bool = False
 no_op: bool = False
 
-# Important environment
 generic_downloader = GenericDownloader()
+
+# Register downloaders
 used_downloaders = [
     generic_downloader,
     RedditDownloader(),
@@ -45,12 +40,12 @@ used_downloaders = [
     ImgurDownloader()
 ]
 
+# Important environment
 env = ensure_environment(used_downloaders)
 downloader_registry: dict[Pattern, BaseDownloader] = {}
 
 stats: dict[str, int] = {}
-duplicate_count: int = 0
-last_duplicate: bool = False
+dup_map: dict[str, str] = dict()
 
 
 def acoustic_alert() -> None:
@@ -61,7 +56,7 @@ def acoustic_alert() -> None:
         winsound.Beep(freq, duration)
 
 
-async def download(url: str, target: str) -> str:
+async def download(url: str, target: str) -> (str, Path):
     result = urlparse(url)
     urlpath = None
     if urlpath and not result.path == "":
@@ -81,28 +76,54 @@ async def download(url: str, target: str) -> str:
     raise NoDownloaderException
 
 
-async def handle_submission(submission: Submission, target_dir: str, jobid: int) -> None:
-    # await submission.load()
+async def handle_text(submission: Submission, target_dir: str, jobId: int) -> None:
+
+    title = submission.title
+    text = submission.text
+
+
+
+
+
+async def handle_url(url: str, submission: Submission, target_dir: str, jobid: int) -> None:
     score_color = Fore.GREEN if submission.score > 0 else Fore.RED
-    urls = StandardUrlResolver().resolve(submission)
+    try:
+        digest, filepath = await download(url, target_dir)
+        if digest == "":
+            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+                  f"{submission.title}")
+        else:
+            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+                  f"{submission.title} [{digest}]")
+        dup_map.update({submission.id: str(
+            filepath) if filepath is not None else ""})  # Only add submission if download was successful
+    except NoDownloaderException:
+        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+              f"No downloader for url: {Fore.YELLOW}{url}{Fore.RESET}")
+    except HTTPError as httperror:
+        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+              f"HTTP Error {Fore.YELLOW}{httperror}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
+        if hasattr(httperror.response, "status_code") and httperror.response.status_code == 404:
+            dup_map.update({submission.id: ""})  # Data was probably deleted, no need to revisit
+    except Exception as error:
+        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+              f"Error {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
 
-    for url in urls:
-        try:
-            digest, filepath = await download(url, target_dir)
-            if digest == "":
-                print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] {submission.title}")
-            else:
-                print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] {submission.title} [{digest}]")
-        except NoDownloaderException:
-            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] No downloader for url: {Fore.YELLOW}{url}{Fore.RESET}")
-        except HTTPError as httperror:
-            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] HTTP Error {Fore.YELLOW}{httperror}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
-        except Exception as error:
-            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] Error {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
+
+async def handle_submission(submission: Submission, target_dir: str, jobid: int) -> None:
+    try:
+        if submission.is_self:
+            await handle_text(submission, target_dir, jobid)
+        else:
+            urls = StandardUrlResolver().resolve(submission)
+            for url in urls:
+                await handle_url(url, submission, target_dir, jobid)
+    except Exception as error:
+        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. Critical Error {Fore.RED}{error}{Fore.RESET} for submission: " +
+              f"{Fore.RED}{submission.permalink}{Fore.RESET}")
 
 
-async def handle_subreddit(reddit: Reddit, subreddit_name: str, major: int) -> None:
-
+async def handle_subreddit(reddit: Reddit, subreddit_name: str, data_dir: Path, temp_dir: Path, meta_dir: Path) -> None:
     start_time = time.perf_counter()
     subreddit = await reddit.subreddit(subreddit_name)
     await subreddit.load()
@@ -110,22 +131,40 @@ async def handle_subreddit(reddit: Reddit, subreddit_name: str, major: int) -> N
     os.makedirs(target_dir, exist_ok=True)
 
     print("=" * HEADERS)
-    print(f"> {Fore.BLUE}Data folder{Fore.RESET}  : {data_dir}")
-    print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
-    print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target_dir}")
     print(f"> {Fore.BLUE}Subreddit{Fore.RESET}    : r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
-    print(f"> {Fore.BLUE}Limit{Fore.RESET}        : {LIMIT}")
-    print(f"> {Fore.BLUE}Early abort limit{Fore.RESET}: {EARLY_ABORT}")
+    print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target_dir}")
     print("=" * HEADERS + os.linesep)
 
     async with asyncio.TaskGroup() as tg:
-        jobid: int = 1
-        async for submission in subreddit.new(limit=LIMIT):
-            await submission.load()
-            tg.create_task(handle_submission(submission, target_dir, jobid))
-            jobid += 1
+
+        MAX_RETRIES = 3
+        retries: int = 1  # How often it should be retried to download
+
+        while retries < MAX_RETRIES:
+            jobid: int = 1  # Actual jobs that get downloaded
+            taskid: int = 1  # Jobs that get checked but have already been downloaded
+            try:
+                async for submission in subreddit.new(limit=LIMIT):
+                    if submission.id not in dup_map.keys():
+                        await submission.load()
+                        tg.create_task(handle_submission(submission, target_dir, jobid))
+                        jobid += 1
+                        if jobid > 10 and jobid % 50 == 0:
+                            tg.create_task(store_dupmap(dup_map, meta_dir))
+                    if (taskid % int(LIMIT / 50)) == 0:
+                        print(" " * 3 +
+                              f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done " +
+                              f" took {timedelta(seconds=(time.perf_counter() - start_time))} so far{Fore.RESET}")
+                    taskid += 1
+                retries = MAX_RETRIES + 1
+            except Exception as error:
+                retries += 1
+                print(f"An {Fore.RED}{error.__class__.__name__}{Fore.RESET} occrred: {error} retrieing {MAX_RETRIES - retries} more times")
+
     end_time = time.perf_counter()
-    print(f"> Downloading subreddit took {Fore.BLUE}{timedelta(seconds=(end_time-start_time))}{Fore.RESET}")
+    await store_dupmap(dup_map, meta_dir)
+    print(f"> Downloading subreddit took {Fore.BLUE}{timedelta(seconds=(end_time - start_time))}{Fore.RESET} " +
+          f"dupmap contains {Fore.BLUE}{len(dup_map)}{Fore.RESET} elements.")
 
 
 async def cleanup(data_dir: Path, temp_dir: Path) -> None:
@@ -135,31 +174,69 @@ async def cleanup(data_dir: Path, temp_dir: Path) -> None:
 
     dup_map: dict[int, str] = dict()
 
-    for p, sd, files in os.walk(data_dir):
-        for name in files:
+    for dirpath, dirnames, filenames in os.walk(data_dir):
+        for name in filenames:
             try:
-                name_path = os.path.join(p, name)
-                if name.startswith(".") or name.endswith(".xsl"):
+                name_path = os.path.join(dirpath, name)
+                filepath = Path(dirpath) / name
+
+                # Recalcuate hash to use xxhash3
+                if is_sha256(name) and False:
+                    new_hash = ubelt.hash_file(Path(name_path), hasher=xxhash.xxh128)
+                    new_path = Path(dirpath) / f"xx{new_hash}.{filepath.suffix}"
+                    if new_path.exists():
+                        # delete if the file is a duplicate
+                        os.unlink(filepath)
+                    else:
+                        os.rename(name_path, new_path)
+
+                if name.startswith(".") or filepath.suffix == ".xsl":
                     os.unlink(name_path)
-                else:
+                elif is_sha256(name):
                     try:
                         hex_key = int(name.split(".")[0], 16)
                         if hex_key in dup_map:
-                            print(
-                                f" - Found duplicate file: {Fore.YELLOW}{name_path}{Fore.RESET} - {Fore.YELLOW}{dup_map[hex_key]}{Fore.RESET}")
                             if name_path[0:name_path.rfind("/")] == dup_map[hex_key]:
+                                print(f" - Found duplicate file: {Fore.YELLOW}{name_path}{Fore.RESET} - " +
+                                      f"{Fore.YELLOW}{dup_map[hex_key]}{Fore.RESET}")
                                 os.unlink(name_path)
                         else:
                             dup_map[hex_key] = name_path
                         if ".." in name:
-                            print(
-                                f" - Renaming malformed file: {Fore.YELLOW}{name}{Fore.RESET} - {Fore.YELLOW}{name.replace('..', '.')}{Fore.RESET}")
-                            os.rename(os.path.join(p, name), os.path.join(p, name.replace("..", ".")))
+                            print(f" - Renaming malformed file: {Fore.YELLOW}{name}{Fore.RESET} - " +
+                                  f"{Fore.YELLOW}{name.replace('..', '.')}{Fore.RESET}")
+                            os.rename(os.path.join(dirpath, name), os.path.join(dirpath, name.replace("..", ".")))
                     except ValueError:
                         pass
             except FileNotFoundError:
                 pass
     print(f"Dupmap contained {len(dup_map)} elements")
+
+
+def print_reporting():
+    print("=" * HEADERS)
+    total_calls = sum(stats.values())
+    print(f"Used providers and cdn's over {total_calls} attempted downloads:")
+
+    for key, value in reversed(sorted(stats.items(), key=lambda item: item[1])):
+        color = Fore.GREEN if any(pattern.match(key) for pattern in downloader_registry.keys()) else Fore.RED
+        valstr = f"{value: 4}" if value is not None else "NONE"
+        print(f" - {Fore.BLUE}{key:>48}{Fore.RESET}: {valstr}  " +
+              f"<{color}{round(value / total_calls * 10_000) / 100:4.1f}%{Fore.RESET}>")
+    print("=" * HEADERS)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=f"A Subreddit Downloader V{VERSION} for the CLI", epilog="")
+    parser.add_argument("subreddits", metavar="SR", nargs="*", help="The subreddit(s) to be downloaded")
+    parser.add_argument("--data", "-d", required=True, action="store")
+    parser.add_argument("--temp", "-t", required=False, action="store")
+    parser.add_argument("--meta", "-m", required=False, action="store")
+    parser.add_argument("--limit", "-l", required=False, action="store")
+    parser.add_argument("--refresh", "-r", required=False, action="store_true")
+    parser.add_argument("--no-cleanup", "-nc", required=False, action="store_true")
+    parser.add_argument("--no-op", "-no", required=False, action="store_true")
+    return parser.parse_args()
 
 
 async def main() -> None:
@@ -170,22 +247,26 @@ async def main() -> None:
     print("")
 
     # Initialize argparse
-    global refresh_mode, data_dir, temp_dir, no_op
+    global refresh_mode, no_op, dup_map, LIMIT
 
-    parser = argparse.ArgumentParser(description=f"A Subreddit Downloader V{VERSION} for the CLI", epilog="")
-    parser.add_argument("subreddits", metavar="SR", nargs="*", help="The subreddit(s) to be downloaded")
-    parser.add_argument("--data", "-d", required=True, action="store")
-    parser.add_argument("--temp", "-t", required=False, action="store")
-    parser.add_argument("--refresh", "-r", required=False, action="store_true")
-    parser.add_argument("--no-cleanup", "-nc", required=False, action="store_true")
-    parser.add_argument("--no-op", "-no", required=False, action="store_true")
-    pargs = parser.parse_args()
-
+    pargs = parse_args()
     data_dir = Path(pargs.data)
     if not pargs.temp:
-        temp_dir = Path(os.path.join(data_dir, "temp"))
+        temp_dir = Path(data_dir, "temp")
     else:
         temp_dir = pargs.temp
+
+    if not pargs.meta:
+        meta_dir = Path(data_dir, "meta")
+    else:
+        meta_dir = pargs.meta
+
+    if pargs.limit:
+        try:
+            LIMIT = int(pargs.limit)
+        except ValueError:
+            pass
+
     refresh_mode = pargs.refresh
     no_cleanup = pargs.no_cleanup
     no_op = pargs.no_op
@@ -193,11 +274,14 @@ async def main() -> None:
 
     env[DATA_LOCATION] = str(data_dir)
     env[TEMP_LOCATION] = str(temp_dir)
+    env[META_LOCATION] = str(meta_dir)
 
-    if not temp_dir.exists():
-        os.makedirs(temp_dir, exist_ok=True)
     if not data_dir.exists():
         os.makedirs(data_dir, exist_ok=True)
+    if not temp_dir.exists():
+        os.makedirs(temp_dir, exist_ok=True)
+    if not meta_dir.exists():
+        os.makedirs(meta_dir, exist_ok=True)
 
     # Initialize downloaders with environment
     global downloader_registry
@@ -208,11 +292,30 @@ async def main() -> None:
         for host_pattern in dl.get_supported_domains():
             downloader_registry[host_pattern] = dl
 
-    reddit = asyncpraw.Reddit(
-        client_id=env[REDDIT_CLIENT_ID],
-        client_secret=env[REDDIT_CLIENT_SECRET],
-        user_agent=f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
-    )
+    # Load dupmap
+    dup_map = await load_dupmap(meta_dir)
+
+    print("")
+    print(f"> {Fore.BLUE}Dupmap length{Fore.RESET}: {len(dup_map)}")
+    print(f"> {Fore.BLUE}Data folder{Fore.RESET}  : {data_dir}")
+    print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
+    print(f"> {Fore.BLUE}Meta. folder{Fore.RESET} : {meta_dir}")
+    print(f"> {Fore.BLUE}Limit{Fore.RESET}        : {LIMIT}")
+
+    if env[REDDIT_USERNAME] and env[REDDIT_PASSWORD]:
+        reddit = asyncpraw.Reddit(
+            client_id=env[REDDIT_CLIENT_ID],
+            client_secret=env[REDDIT_CLIENT_SECRET],
+            username=env[REDDIT_USERNAME],
+            password=env[REDDIT_PASSWORD],
+            user_agent=f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
+        )
+    else:
+        reddit = asyncpraw.Reddit(
+            client_id=env[REDDIT_CLIENT_ID],
+            client_secret=env[REDDIT_CLIENT_SECRET],
+            user_agent=f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
+        )
 
     # Add check if no subreddit name is given
     subreddit_names = list(subreddits)
@@ -228,28 +331,30 @@ async def main() -> None:
         print(
             f"Downloading multiple: {os.linesep}    - {Fore.RED}{f'{os.linesep}{Fore.RESET}    - {Fore.RED}'.join(sorted(subreddit_names))}{Fore.RESET}")
 
-    for major, subreddit_name in enumerate(sorted(subreddit_names), 1):
-        await handle_subreddit(reddit, subreddit_name, major)
+    # random.shuffle(subreddit_names)
+    for idx, subreddit_name in enumerate(subreddit_names):
+        print(f"> r/{Fore.LIGHTBLUE_EX}{subreddit_names[idx] if idx > 0 else 'FIRST'}{Fore.RESET} >> " +
+              f"r/{Fore.CYAN}{subreddit_name}{Fore.RESET} >> " +
+              f"r/{Fore.BLUE}{subreddit_names[idx + 1] if idx + 1 < len(subreddit_names) else 'LAST'}{Fore.RESET}"
+              )
+        print(f"> {Fore.CYAN}{(idx + 1) / len(subreddit_names)}{Fore.RESET}% remaining")
+        await handle_subreddit(reddit, subreddit_name, data_dir, temp_dir, meta_dir)
 
     await reddit.close()
 
-    print("=" * HEADERS)
-    total_calls = sum(stats.values())
-    print(f"Used providers and cdn's over {total_calls} attempted downloads:")
+    # Store dupmap
+    await store_dupmap(dup_map, meta_dir)
+    print_reporting()
 
-    for key, value in reversed(sorted(stats.items(), key=lambda item: item[1])):
-        color = Fore.GREEN if any(pattern.match(key) for pattern in downloader_registry.keys()) else Fore.RED
-        print(
-            f" - {Fore.BLUE}{key:>32}{Fore.RESET}: {value:4}  <{color}{round(value / total_calls * 10_000) / 100:4.1f}%{Fore.RESET}>")
-    print("=" * HEADERS)
     if not no_cleanup:
         await cleanup(data_dir, temp_dir)
+
     acoustic_alert()
 
 
 if __name__ == "__main__":
     start = time.perf_counter()
-    wakepy.set_keepawake(keep_screen_awake=False)
+    # wakepy.set_keepawake(keep_screen_awake=False)
 
     init()  # colorama init
     asyncio.run(main())
@@ -257,6 +362,6 @@ if __name__ == "__main__":
     for downloader in downloader_registry.values():
         downloader.close()
 
-    wakepy.unset_keepawake()
+    # wakepy.unset_keepawake()
     elapsed = time.perf_counter() - start
-    print(f"{Fore.BLUE}{__file__}{Fore.RESET} executed in {Fore.BLUE}{timedelta(seconds=elapsed)}{Fore.RESET} seconds.")
+    print(f"{Fore.BLUE}{__file__}{Fore.RESET} executed in {Fore.BLUE}{timedelta(seconds=elapsed)}{Fore.RESET}.")

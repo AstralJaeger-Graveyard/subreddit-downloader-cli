@@ -1,6 +1,11 @@
 
 TEMP_LOCATION = "temp_location"
 DATA_LOCATION = "data_location"
+META_LOCATION = "meta_location"
 REDDIT_CLIENT_ID = "reddit_cid"
 REDDIT_CLIENT_SECRET = "reddit_cs"
+REDDIT_USERNAME = "reddit_user"
+REDDIT_PASSWORD = "reddit_password"
 IMGUR_CLIENT_ID = "imgur_cid"
+GFYCAT_CLIENT_ID = "gfycat_cid"
+GFYCAT_CLIENT_SECRET = "gfycat_cs"
