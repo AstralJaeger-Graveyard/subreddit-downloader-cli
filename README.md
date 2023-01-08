@@ -25,3 +25,6 @@ if you wish to move your data folder to a different location,
 please ensure to update these paths.
 
 The application also requires Python 3.11 due to the use of ``TaskGroups`` which were only added in it.
+
+Due to the Reddit API limit, it will take around 15 minutes per 1000 posts (which is the limit of the API).
+So please calculate 15-17 minutes per new subreddit and 1000 posts.

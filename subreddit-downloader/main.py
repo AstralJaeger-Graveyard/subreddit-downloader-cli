@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import datetime
 import math
 import os
 import os.path
@@ -78,11 +79,39 @@ async def download(url: str, target: str) -> (str, Path):
 
 async def handle_text(submission: Submission, target_dir: str, jobId: int) -> None:
 
+    id = submission.id
+    score_color = Fore.GREEN if submission.score > 0 else Fore.RED
     title = submission.title
-    text = submission.text
+    text = submission.selftext
+    author = submission.author
+    created = datetime.datetime.fromtimestamp(submission.created_utc)
+    subreddit = submission.subreddit.display_name
 
+    sanitized_title = title.lower()\
+        .replace(' ', '_')\
+        .replace('-', '_')
+    sanitized_title = re.sub('[^0-9a-zA-Z_]+', '', sanitized_title)
 
+    filename = f"{id}_{sanitized_title}.md"
 
+    filepath = Path(target_dir, filename)
+    if filepath.exists():
+        print(f" - {Fore.BLUE}{jobId:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+              f"{submission.title}")
+        return
+    else:
+        with open(filepath, "w") as file:
+            file.write(f"# {title}{os.linesep}")
+            file.write(f"---{os.linesep}")
+            file.write(f"Author: {author}{os.linesep}")
+            file.write(f"Created: {created}{os.linesep}")
+            file.write(f"Subreddit: {subreddit}{os.linesep}")
+            file.write(f"---{os.linesep}")
+            file.write(f"{text}")
+
+    print(f" - {Fore.BLUE}{jobId:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+          f"{submission.title} [{filename}]")
+    dup_map.update({submission.id: str(filepath) if filepath is not None else ""})
 
 
 async def handle_url(url: str, submission: Submission, target_dir: str, jobid: int) -> None:
@@ -95,8 +124,8 @@ async def handle_url(url: str, submission: Submission, target_dir: str, jobid: i
         else:
             print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
                   f"{submission.title} [{digest}]")
-        dup_map.update({submission.id: str(
-            filepath) if filepath is not None else ""})  # Only add submission if download was successful
+        # Only add submission if download was successful
+        dup_map.update({submission.id: str(filepath) if filepath is not None else ""})
     except NoDownloaderException:
         print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
               f"No downloader for url: {Fore.YELLOW}{url}{Fore.RESET}")
@@ -219,7 +248,7 @@ def print_reporting():
     print(f"Used providers and cdn's over {total_calls} attempted downloads:")
 
     for key, value in reversed(sorted(stats.items(), key=lambda item: item[1])):
-        color = Fore.GREEN if any(pattern.match(key) for pattern in downloader_registry.keys()) else Fore.RED
+        color = Fore.GREEN if any((pattern.match(key) if pattern.match(key) is not None else False) for pattern in downloader_registry.keys()) else Fore.RED
         valstr = f"{value: 4}" if value is not None else "NONE"
         print(f" - {Fore.BLUE}{key:>48}{Fore.RESET}: {valstr}  " +
               f"<{color}{round(value / total_calls * 10_000) / 100:4.1f}%{Fore.RESET}>")
@@ -319,25 +348,22 @@ async def main() -> None:
 
     # Add check if no subreddit name is given
     subreddit_names = list(subreddits)
-    refresh_mode = False
 
-    if len(subreddit_names) == 0:
+    if refresh_mode or len(subreddit_names) == 0:
         print(f"No subreddit names passed, looking for existing resources and refreshing existing resources")
         existing = glob(os.path.join(data_dir, "ws-*"))
-        subreddit_names = [srn.split(os.sep)[-1].replace("ws-", "") for srn in existing]
-        refresh_mode = True
+        subreddit_names = subreddit_names + sorted([srn.split(os.sep)[-1].replace("ws-", "") for srn in existing])
 
     if len(subreddit_names) > 1:
-        print(
-            f"Downloading multiple: {os.linesep}    - {Fore.RED}{f'{os.linesep}{Fore.RESET}    - {Fore.RED}'.join(sorted(subreddit_names))}{Fore.RESET}")
+        print(f"Downloading multiple: {os.linesep}" +
+              f"    - {Fore.RED}{f'{os.linesep}{Fore.RESET}    - {Fore.RED}'.join(subreddit_names)}" +
+              f"{Fore.RESET}")
 
-    # random.shuffle(subreddit_names)
     for idx, subreddit_name in enumerate(subreddit_names):
-        print(f"> r/{Fore.LIGHTBLUE_EX}{subreddit_names[idx] if idx > 0 else 'FIRST'}{Fore.RESET} >> " +
+        print(f"> r/{Fore.LIGHTBLUE_EX}{subreddit_names[idx - 1] if idx > 0 else 'FIRST'}{Fore.RESET} >> " +
               f"r/{Fore.CYAN}{subreddit_name}{Fore.RESET} >> " +
-              f"r/{Fore.BLUE}{subreddit_names[idx + 1] if idx + 1 < len(subreddit_names) else 'LAST'}{Fore.RESET}"
-              )
-        print(f"> {Fore.CYAN}{(idx + 1) / len(subreddit_names)}{Fore.RESET}% remaining")
+              f"r/{Fore.BLUE}{subreddit_names[idx + 1] if idx + 1 < len(subreddit_names) else 'LAST'}{Fore.RESET}")
+        print(f"> {Fore.CYAN}{round((1 - (idx + 1) / len(subreddit_names)) * 100)}{Fore.RESET}% remaining")
         await handle_subreddit(reddit, subreddit_name, data_dir, temp_dir, meta_dir)
 
     await reddit.close()

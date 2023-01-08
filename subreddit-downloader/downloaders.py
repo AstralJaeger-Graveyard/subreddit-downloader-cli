@@ -1,23 +1,19 @@
 import mimetypes
 import re
 import shutil
-import time
-from pathlib import Path
-from urllib.parse import urlparse
+from hashlib import sha256
 from os import path, PathLike
+from pathlib import Path
 from re import Pattern
 from tempfile import SpooledTemporaryFile
-from hashlib import sha256
+from urllib.parse import urlparse
 
 import fleep
+import requests
+from colorama import Fore
+from requests import Response
 
 from environmentlabels import *
-
-import requests
-from requests import Response, HTTPError
-from colorama import Fore
-
-DUPLICATE_FILE_WARNING = f"{Fore.LIGHTBLACK_EX}Duplicate File{Fore.RESET}"
 
 
 class DuplicateFileException(Exception):
@@ -103,17 +99,19 @@ class GenericDownloader(BaseDownloader):
             re.compile(r"^(i\.)?ibb\.co"),
             re.compile(r"^(lotus\.)?paheal\.net"),
             re.compile(r"^(img\d\.)?gelbooru\.com"),
-            # re.compile(r"^booru\.plus"),  # Seems a little more problematic, depends on exact url
             re.compile(r"^(d\.)?facdn\.net"),
             re.compile(r"^(cdn[a-z\d]\.)?artstation\.com"),
             re.compile(r"^(art\.)?ngfiles\.com"),
             re.compile(r"^(pictures\.)?hentai-foundry\.com"),
-            re.compile(r"^(media\.)?discordapp\.net"),
-            re.compile(r"^(cdn\.)?discordapp\.net"),
+            re.compile(r"^(media\.)?discordapp\.(net)?(com)?"),
+            re.compile(r"^(cdn\.)?discordapp\.(net)?(com)?"),
             re.compile(r"^(files\.)catbox\.moe"),
             re.compile(r"^(file\.)coffee"),
             re.compile(r"simoneluxe\.com"),
             re.compile(r"uploadir\.com"),
+            re.compile(r"i\.postimg\.cc"),
+            re.compile(r"dl\.phncdn\.com"),
+            re.compile(r"([it]\d\.)nhentai\.net"),
             re.compile(r"(sun\d-\d\.)?userapi\.com"),
             re.compile(r"(\d+\.)?(media\.)?tumblr\.com"),  # Tumblr
             re.compile(r"^(scontent\.)?(fbne\d-\d\.)?(fna\.)fbcdn.net"),  # Facebook CDN
@@ -172,6 +170,7 @@ class RedgifsDownloader(BaseDownloader):
     def get_supported_domains(self) -> list[Pattern]:
         return [
             re.compile(r"(www\.)?redgifs\.com"),
+            re.compile(r"(v\d\.)redgifs\.com"),
             re.compile(r"(i\.)redgifs\.com")
         ]
 
