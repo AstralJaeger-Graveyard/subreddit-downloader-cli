@@ -31,6 +31,15 @@ def ensure_environment(downloaders: list[BaseDownloader]) -> dict[str, str]:
             print(f" - ensuring {Fore.YELLOW}core.{key}{Fore.RESET}: {Fore.GREEN}OK{Fore.RESET}")
             environment[key] = os.environ[key]
 
+    optional_keys = [REDDIT_USERNAME, REDDIT_PASSWORD]
+    for key in optional_keys:
+        if key not in os.environ.keys() or os.environ[key] == "":
+            print(f" - ensuring {Fore.YELLOW}core.optional.{key}{Fore.RESET}: {Fore.YELLOW}MISSING{Fore.RESET}")
+            environment[key] = None
+        else:
+            print(f" - ensuring {Fore.YELLOW}core.optional.{key}{Fore.RESET}: {Fore.GREEN}OK{Fore.RESET}")
+            environment[key] = os.environ[key]
+
     # Downloaders environment:
     print(f"> Loading {Fore.BLUE}downloader{Fore.RESET} environment")
     if len(downloaders) == 0:
