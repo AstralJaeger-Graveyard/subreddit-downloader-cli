@@ -13,7 +13,7 @@ import requests
 from colorama import Fore
 from requests import Response
 
-from environmentlabels import *
+import environmentlabels as envLbl
 
 
 class DuplicateFileException(Exception):
@@ -32,26 +32,60 @@ class BaseDownloader:
     def __init__(self):
         self.no_op = False
         self.environment: dict[str, str] = {}
-        pass
 
     def init(self, environment: dict[str, str], no_op: bool = False) -> None:
+        """
+            Initializes the downloader with an environment instance containing
+            all environment variables from required env
+            Params:
+                environment (dict[str, str]): the environment dictionary
+                no_op (bool): If the downloader should not actually write to disk
+        """
         self.no_op = no_op
         self.environment = environment
 
     def get_supported_domains(self) -> list[Pattern]:
         """
-            Returns a list with supported domains
+            Returns a list of supported domains as compiled regex
+            Params:
+                None
+            Returns:
+                listOfRegex (list(Pattern)): A list of pattern.
         """
         return []
 
     def get_required_env(self) -> list[str]:
+        """
+            Returns a list of required environment variables
+            Params:
+                None
+            Returns:
+                listOfstr (list(str)): A list of str
+        """
         return []
 
-    async def download(self, url, target) -> (str, Path):
+    async def download(self, url: str, target: str | PathLike) -> (str, Path):
+        """
+            Downloads a file from an url and saves it using save_to_disk
+            Parameters:
+                url (str): The url to download from
+                target (str | PathLike): The path to the target folder, must exist before calling this method
+            Returns:
+                tuple (str, Path): A tuple containing file hash and the path as Path to the resulting file
+        """
         pass
 
-    def save_to_disk(self, response: Response, target: str | PathLike) -> (str, Path):
-        with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir=self.environment[TEMP_LOCATION]) as tmp_file:
+    def save_to_disk(self, response: Response, target: str | PathLike) -> (str, PathLike):
+        """
+            Saves a requests.Response to a file named as the hash of the file,
+            determining the file type by using the mine-type or fleep.
+            Parameters:
+                response (Response): The requests.Response to save
+                target (str | PathLike): The path to the target folder, must exist before calling this method
+            Returns:
+                tuple (str, PathLike): A tuple containing file hash and the path as Path to the resulting file
+        """
+        with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir=self.environment[envLbl.TEMP_LOCATION]) as tmp_file:
             shagen = sha256()
             for chunk in response.iter_content(chunk_size=8192):
                 tmp_file.write(chunk)
@@ -78,6 +112,9 @@ class BaseDownloader:
             return digest, filepath
 
     def close(self) -> None:
+        """
+            This method should be called to close open sessions and terminate them properly
+        """
         pass
 
 
@@ -118,9 +155,6 @@ class GenericDownloader(BaseDownloader):
             re.compile(r"^(i\.)?pinimg.com"),  # Pinterest CDN
             re.compile(r"^(images-wixmp-[\da-f]*\.)?wixmp.com")  # WIX CDN
         ]
-
-    def get_required_env(self) -> list[Pattern]:
-        return []
 
     async def download(self, url, target) -> (str, Path):
         with requests.get(url) as response:
@@ -174,9 +208,6 @@ class RedgifsDownloader(BaseDownloader):
             re.compile(r"(i\.)redgifs\.com")
         ]
 
-    def get_required_env(self) -> dict[str, type]:
-        return {}
-
     async def download(self, url, target) -> (str, Path):
         try:
             content_id = self._parse_content_id(url)
@@ -216,7 +247,7 @@ class ImgurDownloader(BaseDownloader):
     def init(self, environment: dict[str, str], no_op: bool = False) -> None:
         super().init(environment, no_op)
         self.__auth = {
-            "Authorization": f"Client-ID {environment[IMGUR_CLIENT_ID]} "
+            "Authorization": f"Client-ID {environment[envLbl.IMGUR_CLIENT_ID]} "
         }
 
     def get_supported_domains(self) -> list[Pattern]:
@@ -239,68 +270,20 @@ class ImgurDownloader(BaseDownloader):
                 return self.save_to_disk(content_response, target)
 
     def _parse_content_id(self, url: str) -> str:
-
+        """
+            Priave mehtod
+            Parses the content ID from an imgur url
+            Params:
+                url (str): The url to parse
+            Returns:
+                content_id (str): The content ID
+        """
         if url.startswith("i"):
-            # handle image
-            last_slash_pos = url.rfind("/") + 1
-            dot_pos = url.rfind(".") if "." in url[last_slash_pos:] else len(url)
-            filename = url[last_slash_pos: dot_pos]
-        else:
-            o = urlparse(url)
-            url_path = o.path
-            if url_path.endswith("/"):
-                url_path = url_path[:len(url_path) - 1]
-            id_str: str = url_path[url_path.rfind("/") + 1:]
-            if "." in id_str:
-                return id_str.split(".")[0]
-            return id_str
-
-    def close(self) -> None:
-        self.__session.close()
-
-
-class GfycatDownloader(BaseDownloader):
-    """
-        A downloader that provides support for gfycat.com
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.__session = requests.Session()
-        self.__auth = {}
-
-    def init(self, environment: dict[str, str], no_op: bool = False) -> None:
-        super().init(environment, no_op)
-        self.__auth = {
-            "Authorization": f"Client-ID {environment[IMGUR_CLIENT_ID]} "
-        }
-
-    def get_supported_domains(self) -> list[Pattern]:
-        # urls are i.imgur.com or sometimes l.imgur.com
-        return [re.compile("([il]\\.)?imgur\\.com")]
-
-    def get_required_env(self) -> list[str]:
-        return [GFYCAT_CLIENT_ID, GFYCAT_CLIENT_SECRET]
-
-    async def download(self, url, target) -> (str, Path):
-        content_id = self._parse_content_id(url)
-        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers=self.__auth,
-                                stream=True) as data_response:
-            data_response.raise_for_status()
-            data = data_response.json()["data"]
-            content_link = data["link"]
-            if hasattr(data, "in_gallery") and data["in_gallery"]:
-                print(f"{' ' * 18} URL: {url} is in gallery: {data['in_gallery']}")
-            with self.__session.get(content_link, headers=self.__auth, stream=True) as content_response:
-                return self.save_to_disk(content_response, target)
-
-    def _parse_content_id(self, url: str) -> str:
-
-        if url.startswith("i"):
-            # handle image
-            last_slash_pos = url.rfind("/") + 1
-            dot_pos = url.rfind(".") if "." in url[last_slash_pos:] else len(url)
-            filename = url[last_slash_pos: dot_pos]
+            # TODO: Redo this branch, handle image
+            # last_slash_pos = url.rfind("/") + 1
+            # dot_pos = url.rfind(".") if "." in url[last_slash_pos:] else len(url)
+            # filename = url[last_slash_pos: dot_pos]
+            return ""
         else:
             o = urlparse(url)
             url_path = o.path

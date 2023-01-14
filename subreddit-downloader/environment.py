@@ -3,42 +3,29 @@ import os
 from colorama import Fore
 
 from downloaders import BaseDownloader
-from environmentlabels import *
+import environmentlabels as envLbl
 
 HEADERS = 96
 
 
 def ensure_environment(downloaders: list[BaseDownloader]) -> dict[str, str]:
     """
-    Ensures the necessary application environment criteria are met
-    :param downloaders: which downloaders are enabled
-    :return: a dictionary with all environment strings
+        Ensures the necessary application environment criteria are met
+        :param downloaders: list of enabled downloaders
+        :return: a dictionary with all environment variables as string
     """
     environment = dict()
-    any_nok = None
-
     print("=" * HEADERS)
     print(f"Loading environment".center(HEADERS))
 
-    # Core Environment:
-    keys = [REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET]
-    print(f"> Loading {Fore.YELLOW}core{Fore.RESET} environment")
-    for key in keys:
-        if key not in os.environ.keys() or os.environ[key] == "":
-            print(f" - ensuring {Fore.YELLOW}core.{key}{Fore.RESET}: {Fore.RED}NOK{Fore.RESET}")
-            any_nok = key
-        else:
-            print(f" - ensuring {Fore.YELLOW}core.{key}{Fore.RESET}: {Fore.GREEN}OK{Fore.RESET}")
-            environment[key] = os.environ[key]
+    core_env = {envLbl.REDDIT_CLIENT_ID, envLbl.REDDIT_CLIENT_SECRET}
+    optional_env = {envLbl.REDDIT_USERNAME, envLbl.REDDIT_PASSWORD}
 
-    optional_keys = [REDDIT_USERNAME, REDDIT_PASSWORD]
-    for key in optional_keys:
-        if key not in os.environ.keys() or os.environ[key] == "":
-            print(f" - ensuring {Fore.YELLOW}core.optional.{key}{Fore.RESET}: {Fore.YELLOW}MISSING{Fore.RESET}")
-            environment[key] = None
-        else:
-            print(f" - ensuring {Fore.YELLOW}core.optional.{key}{Fore.RESET}: {Fore.GREEN}OK{Fore.RESET}")
-            environment[key] = os.environ[key]
+    # Core environment:
+    environment.update(ensure_environment_namespace(core_env, "core"))
+
+    # Optional environment
+    environment.update(ensure_environment_namespace(optional_env, "optional", Fore.LIGHTYELLOW_EX))
 
     # Downloaders environment:
     print(f"> Loading {Fore.BLUE}downloader{Fore.RESET} environment")
@@ -47,15 +34,34 @@ def ensure_environment(downloaders: list[BaseDownloader]) -> dict[str, str]:
     for downloader in downloaders:
         if len(downloader.get_required_env()) == 0:
             print(f" - {Fore.BLUE}{downloader.__class__.__name__}{Fore.RESET} has no environment requirements")
+        else:
+            environment.update(
+                ensure_environment_namespace(
+                    set(downloader.get_required_env()),
+                    downloader.__class__.__name__,
+                    Fore.BLUE)
+            )
 
-        for key in downloader.get_required_env():
-            if key not in os.environ.keys():
-                print(f" - ensuring {Fore.BLUE}{downloader.__class__.__name__}.{key}{Fore.RESET}: {Fore.RED}NOK{Fore.RESET}")
-                any_nok = f"{downloader.__class__.__name__}.{key}"
-            else:
-                print(f" - ensuring {Fore.BLUE}{downloader.__class__.__name__}.{key}{Fore.RESET}: {Fore.GREEN}OK{Fore.RESET}")
-                environment[key] = os.environ.get(key)
+    return environment
+
+
+def ensure_environment_namespace(keys: set[str], namespace: str, color: str = Fore.YELLOW) -> dict[str, str]:
+    print(f"> Loading {Fore.YELLOW}{namespace}{Fore.RESET} environment")
+    any_nok = False
+    env: dict[str, str] = dict()
+
+    for key in keys:
+        if key not in os.environ.keys() or os.environ[key] == "":
+            print(f" - ensuring {color}{namespace}.{key}{Fore.RESET}: {Fore.RED}NOK{Fore.RESET}")
+            any_nok = key
+        else:
+            print(f" - ensuring {color}{namespace}.{key}{Fore.RESET}: {Fore.GREEN}OK{Fore.RESET}")
+            env[key] = os.environ[key]
+    raise_for_any_nok(any_nok)
+    return env
+
+
+def raise_for_any_nok(any_nok: bool) -> None:
     print("")
     if any_nok is not None:
         raise ValueError(f"Key {Fore.RED}{any_nok}{Fore.RESET} not found")
-    return environment
