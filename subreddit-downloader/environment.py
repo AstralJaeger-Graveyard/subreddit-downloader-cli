@@ -63,5 +63,5 @@ def ensure_environment_namespace(keys: set[str], namespace: str, color: str = Fo
 
 def raise_for_any_nok(any_nok: bool) -> None:
     print("")
-    if any_nok is not None:
+    if any_nok:
         raise ValueError(f"Key {Fore.RED}{any_nok}{Fore.RESET} not found")
