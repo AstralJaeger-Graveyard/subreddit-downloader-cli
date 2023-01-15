@@ -25,7 +25,7 @@ def ensure_environment(downloaders: list[BaseDownloader]) -> dict[str, str]:
     environment.update(ensure_environment_namespace(core_env, "core"))
 
     # Optional environment
-    environment.update(ensure_environment_namespace(optional_env, "optional", Fore.LIGHTYELLOW_EX))
+    environment.update(ensure_environment_namespace(optional_env, "optional", Fore.CYAN))
 
     # Downloaders environment:
     print(f"> Loading {Fore.BLUE}downloader{Fore.RESET} environment")
@@ -46,7 +46,7 @@ def ensure_environment(downloaders: list[BaseDownloader]) -> dict[str, str]:
 
 
 def ensure_environment_namespace(keys: set[str], namespace: str, color: str = Fore.YELLOW) -> dict[str, str]:
-    print(f"> Loading {Fore.YELLOW}{namespace}{Fore.RESET} environment")
+    print(f"> Loading {color}{namespace}{Fore.RESET} environment")
     any_nok = False
     env: dict[str, str] = dict()
 

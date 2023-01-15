@@ -1,20 +1,20 @@
 import argparse
 import asyncio
 import datetime
+import math
 import os
 import os.path
 import platform
 import re
 import time
+import typing
 import urllib.parse
+from collections import Counter
 from datetime import timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 
 import requests
-import asyncpraw
-import ubelt
-import xxhash
 from asyncpraw import Reddit
 from asyncpraw.models import Submission, Subreddit
 from asyncprawcore.exceptions import ResponseException
@@ -24,7 +24,7 @@ import environmentlabels as envlbl
 from downloaders import BaseDownloader, GenericDownloader, RedditDownloader, RedgifsDownloader, ImgurDownloader, \
     NoDownloaderException
 from environment import ensure_environment
-from urlresolvers import StandardUrlResolver
+from urlresolvers import StandardUrlResolver, CrosspostUrlResolver
 from utils import is_sha256, load_dupmap, store_dupmap
 
 # Constants
@@ -46,7 +46,7 @@ used_downloaders = [
 env = ensure_environment(used_downloaders)
 downloader_registry: dict[re.Pattern, BaseDownloader] = {}
 
-stats: dict[str, int] = {}
+stats: Counter = Counter()
 dup_map: dict[str, str] = dict()
 
 
@@ -67,10 +67,7 @@ async def download(url: str, target: str) -> (str, Path):
     match_str = f"{result.hostname}/{urlpath}" if urlpath else result.hostname
 
     # Count used hosts
-    if match_str in stats.keys():
-        stats[match_str] = stats[match_str] + 1
-    else:
-        stats[match_str] = 1
+    stats.update([match_str])
 
     for provider in downloader_registry.keys():
         if re.match(provider, match_str):
@@ -140,20 +137,25 @@ async def handle_url(url: str, submission: Submission, target_dir: str, jobid: i
               f"Error {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
 
 
-async def handle_submission(submission: Submission, target_dir: str, jobid: int) -> None:
+async def handle_submission(submission: Submission, reddit: Reddit, target_dir: str, jobid: int) -> None:
     try:
         if submission.is_self:
             await handle_text(submission, target_dir, jobid)
+        elif hasattr(submission, "crosspost_parent") and submission.crosspost_parent is not None:
+            urls = await CrosspostUrlResolver(reddit).resolve(submission)
+            for url in urls:
+                await handle_url(url, submission, target_dir, jobid)
         else:
-            urls = StandardUrlResolver().resolve(submission)
+            urls = await StandardUrlResolver(reddit).resolve(submission)
             for url in urls:
                 await handle_url(url, submission, target_dir, jobid)
     except Exception as error:
         print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. Critical Error {Fore.RED}{error}{Fore.RESET} for submission: " +
               f"{Fore.RED}{submission.permalink}{Fore.RESET}")
+        raise error
 
 
-async def handle_subreddit(subreddit: Subreddit, data_dir: Path, meta_dir: Path) -> None:
+async def handle_subreddit(subreddit: Subreddit, reddit: Reddit, data_dir: Path, meta_dir: Path) -> None:
     start_time = time.perf_counter()
     target_dir = os.path.join(data_dir, f"ws-{subreddit.display_name.lower()}")
     os.makedirs(target_dir, exist_ok = True)
@@ -162,26 +164,26 @@ async def handle_subreddit(subreddit: Subreddit, data_dir: Path, meta_dir: Path)
     print(f"> {Fore.BLUE}Subreddit{Fore.RESET}    : r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
     print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target_dir}")
     print("=" * HEADERS + os.linesep)
+    max_retries = 3
 
     async with asyncio.TaskGroup() as tg:
-
-        max_retries = 3
         retries: int = 1  # How often it should be retried to download
-
         while retries < max_retries:
             jobid: int = 1  # Actual jobs that get downloaded
             taskid: int = 1  # Jobs that get checked but have already been downloaded
             try:
+                steps = 10 if LIMIT <= 20 else 25
+                reporting_steps = int(math.ceil(LIMIT / steps))
                 async for submission in subreddit.new(limit = LIMIT):
                     if submission.id not in dup_map.keys():
                         await submission.load()
-                        tg.create_task(handle_submission(submission, target_dir, jobid))
+                        tg.create_task(handle_submission(submission, reddit, target_dir, jobid))
                         jobid += 1
                         if jobid > 10 and jobid % 50 == 0:
                             tg.create_task(store_dupmap(dup_map, meta_dir))
-                    if (taskid % int(LIMIT / 50)) == 0:
+                    if taskid % reporting_steps == 0:
                         print(" " * 3 +
-                              f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done " +
+                              f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done." +
                               f" took {timedelta(seconds = (time.perf_counter() - start_time))} so far{Fore.RESET}")
                     taskid += 1
                 retries = max_retries + 1
@@ -252,7 +254,7 @@ def print_progress(subreddits: list[Subreddit], idx: int):
 
 
 @asynccontextmanager
-async def reddit_handler(environment: dict[str, str]) -> Reddit:
+async def reddit_handler(environment: dict[str, str]) -> typing.AsyncGenerator:
     if environment[envlbl.REDDIT_USERNAME] and environment[envlbl.REDDIT_PASSWORD]:
         reddit = Reddit(
                 client_id = environment[envlbl.REDDIT_CLIENT_ID],
@@ -283,7 +285,6 @@ def build_dlregistry(downloaders: list[BaseDownloader], no_op: bool = False):
 
 
 async def cleanup(data_dir: Path, temp_dir: Path) -> None:
-    # TODO: Cleanup the cleanup method, this feature is due to be removed or re-implemented
     print(f"> {Fore.BLUE}Cleaning up folder{Fore.RESET}  : {data_dir}")
     print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
     print("=" * HEADERS)
@@ -295,16 +296,6 @@ async def cleanup(data_dir: Path, temp_dir: Path) -> None:
             try:
                 name_path = os.path.join(dir_path, name)
                 filepath = Path(dir_path) / name
-
-                # Recalculate hash to use xxhash3
-                if is_sha256(name) and False:
-                    new_hash = ubelt.hash_file(Path(name_path), hasher = xxhash.xxh128)
-                    new_path = Path(dir_path) / f"xx{new_hash}.{filepath.suffix}"
-                    if new_path.exists():
-                        # delete if the file is a duplicate
-                        os.unlink(filepath)
-                    else:
-                        os.rename(name_path, new_path)
 
                 if name.startswith(".") or filepath.suffix == ".xsl":
                     os.unlink(name_path)
@@ -326,10 +317,14 @@ async def cleanup(data_dir: Path, temp_dir: Path) -> None:
                         pass
             except FileNotFoundError:
                 pass
-    print(f"Duplicate map contained {len(file_map)} elements")
+    print(f"File map contained {len(file_map)} elements")
 
 
-def print_reporting(reporting_stats: dict[str, int]) -> None:
+def is_supported(url: str, registry: dict[re.Pattern, BaseDownloader]) -> bool:
+    return any(p.match(url) is not None for p in registry.keys())
+
+
+def print_reporting(reporting_stats: dict[str, int], registry: dict[str, BaseDownloader]) -> None:
     """
         Prints a reporting to STDOUT
         Params:
@@ -339,13 +334,10 @@ def print_reporting(reporting_stats: dict[str, int]) -> None:
     total_calls = sum(reporting_stats.values())
     print(f"Used providers and cdn's over {total_calls} attempted downloads:")
 
-    for key, value in reversed(sorted(reporting_stats.items(), key = lambda item: item[1])):
-        color = Fore.RED
-        if any(p.match(key) if p.match(key) is not None else False for p in downloader_registry.keys()):
-            color = Fore.GREEN
-        val_str = f"{value: 4}" if value is not None else "NONE"
-        print(f" - {Fore.BLUE}{key:>48}{Fore.RESET}: {val_str}  " +
-              f"<{color}{round(value / total_calls * 10_000) / 100:4.1f}%{Fore.RESET}>")
+    for key, value in sorted(reporting_stats.items(), key = lambda item: item[1], reverse = True):
+        color = Fore.GREEN if is_supported(key, registry) else Fore.RED
+        percentage = round(value / total_calls * 100, 2)
+        print(f" - {Fore.BLUE}{key + Fore.RESET:.<48}: {value: 4} <{color}{percentage:4.1f}%{Fore.RESET}>")
     print("=" * HEADERS)
 
 
@@ -427,11 +419,11 @@ async def main() -> None:
         subreddits = await prefetch_subreddits(reddit, build_subreddit_list(arg_srs, refresh_mode, data_dir))
         for idx, sr in enumerate(subreddits):
             print_progress(subreddits, idx)
-            await handle_subreddit(sr, data_dir, meta_dir)
+            await handle_subreddit(sr, reddit, data_dir, meta_dir)
 
     # Store duplicate map
     await store_dupmap(dup_map, meta_dir)
-    print_reporting(stats)
+    print_reporting(stats, downloader_registry)
 
     if not no_cleanup:
         await cleanup(data_dir, temp_dir)

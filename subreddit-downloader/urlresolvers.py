@@ -1,24 +1,38 @@
+import abc
+
+from asyncpraw import Reddit
 from asyncpraw.models import Submission
 
 
 class BaseUrlResolver:
+    """
+        This class serves as BaseUrlResolver, the purpose is to allow a more generic and abstracted approach for
+        different behaviours concearning for Reddit submissions types like url submissions
+        , self-text submissions and crossposts
+    """
+    def __init__(self, reddit: Reddit):
+        self.reddit = reddit
 
-    def __int__(self):
-        pass
-
+    @abc.abstractmethod
     def resolve(self, sumbission: Submission) -> set[str]:
+        """
+            This method defines the behaviour to resolve urls from a submission.
+            Params:
+                submission (Submission): The submission to inspect
+            Returns:
+                urls (set[str]): A set of urls from the submission
+        """
         pass
 
 
 class StandardUrlResolver(BaseUrlResolver):
 
-    def __int__(self):
-        pass
+    def __init__(self, reddit: Reddit):
+        super().__init__(reddit)
 
-    def resolve(self, submission: Submission) -> set[str]:
+    async def resolve(self, submission: Submission) -> set[str]:
 
         urls = set()
-
         if hasattr(submission, "media_metadata"):
             image_dict = submission.media_metadata
             for image_item in image_dict.values():
@@ -29,13 +43,18 @@ class StandardUrlResolver(BaseUrlResolver):
                     urls.add(largest_image['mp4'])
                 elif hasattr(largest_image, 'gif'):
                     urls.add(largest_image['gif'])
-
-        if not submission.is_self and \
-                not hasattr(submission, "media_metadata") and \
-                "gallery" not in submission.url:
-            if submission.url.startswith("/r/"):
-                print(f"{' ' * 15} URL {submission.url} for submission {submission.permalink} is malformed")
-                urls.add(f"https://www.reddit.com{submission.url}")
-            else:
-                urls.add(submission.url)
+        else:
+            urls.add(submission.url)
         return urls
+
+
+class CrosspostUrlResolver(BaseUrlResolver):
+
+    def __init__(self, reddit: Reddit):
+        super().__init__(reddit)
+
+    async def resolve(self, submission: Submission) -> set[str]:
+        if hasattr(submission, "crosspost_parent") and submission.crosspost_parent is not None:
+            return await StandardUrlResolver(self.reddit)\
+                .resolve(await self.reddit.submission(url = f"https://www.reddit.com{submission.permalink}"))
+        return set()
