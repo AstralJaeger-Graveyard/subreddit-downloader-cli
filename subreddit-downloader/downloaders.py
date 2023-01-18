@@ -1,6 +1,9 @@
+import datetime
 import mimetypes
+import os
 import re
 import shutil
+import time
 from hashlib import sha256
 from os import path, PathLike
 from pathlib import Path
@@ -12,8 +15,13 @@ import fleep
 import requests
 from colorama import Fore
 from requests import Response
+from bs4 import BeautifulSoup
 
 import environmentlabels as envLbl
+
+# This link points to this GitHub Gist that contains a list of regex to websites
+# that can be downloaded with a simple get request, feel free to create your own or extend the existing gist.
+GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/7b620f40144ffaa6e2c48d56b0867594/raw/aa02b347b8d70df0380c923bb8daffe45bab0d29/simple-downloader-regex.txt"
 
 
 class DuplicateFileException(Exception):
@@ -127,38 +135,9 @@ class GenericDownloader(BaseDownloader):
         super().__init__()
 
     def get_supported_domains(self) -> list[Pattern]:
-        return [
-            re.compile(r"^(wimg\.)?rule34\.xxx"),
-            re.compile(r"^(wimg\.)?rule34\.us"),
-            re.compile(r"^(us\.)?rule34\.xxx"),
-            re.compile(r"^video\.twimg\.com"),
-            re.compile(r"^d\.furaffinity\.net"),
-            re.compile(r"^(static\d\.)?e621\.net"),
-            re.compile(r"^(w\.)?wallhaven\.cc"),
-            re.compile(r"^(i\.)?ibb\.co"),
-            re.compile(r"^(nl\.)?(ib\.)?metapix.net"),
-            re.compile(r"^abload.de"),
-            re.compile(r"^(lotus\.)?paheal\.net"),
-            re.compile(r"^(img\d\.)?gelbooru\.com"),
-            re.compile(r"^(d\.)?facdn\.net"),
-            re.compile(r"^(cdn[a-z\d]\.)?artstation\.com"),
-            re.compile(r"^(art\.)?ngfiles\.com"),
-            re.compile(r"^(pictures\.)?hentai-foundry\.com"),
-            re.compile(r"^(media\.)?discordapp\.(net)?(com)?"),
-            re.compile(r"^(cdn\.)?discordapp\.(net)?(com)?"),
-            re.compile(r"^(files\.)catbox\.moe"),
-            re.compile(r"^(file\.)coffee"),
-            re.compile(r"simoneluxe\.com"),
-            re.compile(r"uploadir\.com"),
-            re.compile(r"i\.postimg\.cc"),
-            re.compile(r"dl\.phncdn\.com"),
-            re.compile(r"([it]\d\.)nhentai\.net"),
-            re.compile(r"(sun\d-\d\.)?userapi\.com"),
-            re.compile(r"(\d+\.)?(media\.)?tumblr\.com"),  # Tumblr
-            re.compile(r"^(scontent\.)?(fbne\d-\d\.)?(fna\.)fbcdn.net"),  # Facebook CDN
-            re.compile(r"^(i\.)?pinimg.com"),  # Pinterest CDN
-            re.compile(r"^(images-wixmp-[\da-f]*\.)?wixmp.com")  # WIX CDN
-        ]
+        with requests.get(GENERIC_DOWNLOADER_GIST_URL) as response:
+            response.raise_for_status()
+            return [re.compile(entry) for entry in response.text.split(os.linesep)]
 
     async def download(self, url, target) -> (str, Path):
         with requests.get(url) as response:
@@ -256,10 +235,10 @@ class ImgurDownloader(BaseDownloader):
 
     def get_supported_domains(self) -> list[Pattern]:
         # urls are i.imgur.com or sometimes l.imgur.com
-        return [re.compile("([il]\\.)?imgur\\.com")]
+        return [re.compile(r"([il]\.)?imgur\.com")]
 
     def get_required_env(self) -> list[str]:
-        return ["imgur_cid"]
+        return [envLbl.IMGUR_CLIENT_ID]
 
     async def download(self, url, target) -> (str, Path):
         content_id = self._parse_content_id(url)
@@ -297,6 +276,111 @@ class ImgurDownloader(BaseDownloader):
             if "." in id_str:
                 return id_str.split(".")[0]
             return id_str
+
+    def close(self) -> None:
+        self.__session.close()
+
+
+class GfycatDownloader(BaseDownloader):
+    """
+        A downloader that provides support for imgur.com
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.__session = requests.Session()
+        self.__auth_token = ""
+        self.__expires_in = ""
+        self.__scope = ""
+        self.__token_type = "bearer"
+        self.__auth_created = None
+
+    def init(self, environment: dict[str, str], no_op: bool = False) -> None:
+        super().init(environment, no_op)
+
+    def get_supported_domains(self) -> list[Pattern]:
+        # urls are i.imgur.com or sometimes l.imgur.com
+        return [re.compile("([il]\\.)?gfycat\\.com")]
+
+    def get_required_env(self) -> list[str]:
+        return [envLbl.GFYCAT_CLIENT_ID, envLbl.GFYCAT_CLIENT_SECRET]
+
+    async def _authenticate(self):
+        if self.__auth_created is None:
+            # Initial authentication
+            payload = {
+                    "grant_type": "client_credentials",
+                    "client_id": self.environment[envLbl.GFYCAT_CLIENT_ID],
+                    "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET]
+                }
+            with self.__session.post(f"https://api.gfycat.com/v1/oauth/token", json = payload) as response:
+                response.raise_for_status()
+                response_data = response.json()
+                self.__auth_token = response_data["access_token"]
+                self.__expires_in = int(response_data["expires_in"])
+                self.__scope = response_data["scope"]
+                self.__token_type = response_data["token_type"]
+                self.__auth_created = datetime.datetime.now()
+                from pprint import pprint
+                pprint(response_data)
+        if (datetime.datetime.now() - self.__auth_created).seconds >=  self.__expires_in - 10:
+            # Re-authentication
+            payload = {
+                "grant_type":    "refresh",
+                "client_id":     self.environment[envLbl.GFYCAT_CLIENT_ID],
+                "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET],
+                "refresh_token": self.__auth_token
+                }
+            with self.__session.post(f"https://api.gfycat.com/v1/oauth/token", json = payload) as response:
+                response.raise_for_status()
+                response_data = response.json()
+                self.__auth_token = response_data["access_token"]
+                self.__expires_in = int(response_data["expires_in"])
+                self.__scope = response_data["scope"]
+                self.__token_type = response_data["token_type"]
+                self.__auth_created = datetime.datetime.now()
+                from pprint import pprint
+                pprint(response_data)
+
+
+
+    async def download(self, url, target) -> (str, Path):
+        content_id = await self._parse_content_id(url)
+        await self._authenticate()
+        headers = {
+                "Authorization": f"{self.__token_type} {self.__auth_token}"
+            }
+        with self.__session.get(f"https://api.gfycat.com/v1/gfycats/{content_id}", headers=headers,
+                                stream=True) as data_response:
+            data_response.raise_for_status()
+            from pprint import pprint
+            # pprint(data_response.json())
+
+            content_link = ""
+            # with self.__session.get(content_link, headers=headers, stream=True) as content_response:
+            #    return self.save_to_disk(content_response, target)
+
+    async def _parse_content_id(self, url: str) -> str:
+        """
+            Priave mehtod
+            Parses the content ID from an imgur url
+            Params:
+                url (str): The url to parse
+            Returns:
+                content_id (str): The content ID
+        """
+        with self.__session.get(url) as response:
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html5lib")
+            from pprint import pprint
+            pprint(soup)
+            print("=" * 100)
+            # Video Player Wrapper element contains links to element containing its id and the video player.
+            vpw = soup.find("div", {"class": "video-player-wrapper"})
+            pprint(vpw)
+
+        last_slash_pos = url.rfind("/") + 1
+        return url[last_slash_pos:]
 
     def close(self) -> None:
         self.__session.close()

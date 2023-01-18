@@ -9,6 +9,7 @@ import re
 import time
 import typing
 import urllib.parse
+import cdblib
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
@@ -65,6 +66,9 @@ async def download(url: str, target: str) -> (str, Path):
     if urlpath and result.path != "":
         urlpath = result.path.split("/")[0]
     match_str = f"{result.hostname}/{urlpath}" if urlpath else result.hostname
+
+    if match_str is None:
+        return ("", None)
 
     # Count used hosts
     stats.update([match_str])
@@ -164,9 +168,11 @@ async def handle_subreddit(subreddit: Subreddit, reddit: Reddit, data_dir: Path,
     print(f"> {Fore.BLUE}Subreddit{Fore.RESET}    : r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
     print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target_dir}")
     print("=" * HEADERS + os.linesep)
-    max_retries = 3
+    max_retries = 10
 
-    async with asyncio.TaskGroup() as tg:
+
+
+    async with asyncio.TaskGroup() as tg :
         retries: int = 1  # How often it should be retried to download
         while retries < max_retries:
             jobid: int = 1  # Actual jobs that get downloaded
@@ -273,7 +279,7 @@ async def reddit_handler(environment: dict[str, str]) -> typing.AsyncGenerator:
     await reddit.close()
 
 
-def build_dlregistry(downloaders: list[BaseDownloader], no_op: bool = False):
+def build_downloader_registry(downloaders: list[BaseDownloader], no_op: bool = False):
     registry: dict[re.Pattern, BaseDownloader] = dict()
     for dl in downloaders:
         dl.init(env, no_op)
@@ -403,7 +409,7 @@ async def main() -> None:
         os.makedirs(meta_dir, exist_ok = True)
 
     # Initialize downloaders with environment
-    downloader_registry = build_dlregistry(used_downloaders, no_op)
+    downloader_registry = build_downloader_registry(used_downloaders, no_op)
 
     # Load duplicate map
     dup_map = await load_dupmap(meta_dir)

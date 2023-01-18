@@ -33,17 +33,15 @@ class StandardUrlResolver(BaseUrlResolver):
     async def resolve(self, submission: Submission) -> set[str]:
 
         urls = set()
-        if hasattr(submission, "media_metadata"):
-            image_dict = submission.media_metadata
-            for image_item in image_dict.values():
+        if hasattr(submission, "media_metadata") and submission.media_metadata is not None:
+            for key, image_item in enumerate(submission.media_metadata.values()):
                 largest_image = image_item['s']
-                if hasattr(largest_image, 'u'):
-                    urls.add(largest_image['u'])
-                elif hasattr(largest_image, 'mp4'):
-                    urls.add(largest_image['mp4'])
-                elif hasattr(largest_image, 'gif'):
-                    urls.add(largest_image['gif'])
-        else:
+                keys = {'u', 'mp4', 'gif'}
+                for k in keys:
+                    if k in largest_image:
+                        urls.add(largest_image[k])
+                        break
+        elif not submission.is_self and not hasattr(submission, "media_metadata") and "gallery" not in submission.url:
             urls.add(submission.url)
         return urls
 
@@ -55,6 +53,16 @@ class CrosspostUrlResolver(BaseUrlResolver):
 
     async def resolve(self, submission: Submission) -> set[str]:
         if hasattr(submission, "crosspost_parent") and submission.crosspost_parent is not None:
-            return await StandardUrlResolver(self.reddit)\
-                .resolve(await self.reddit.submission(url = f"https://www.reddit.com{submission.permalink}"))
+            max_retires = 10
+            retries = 0
+            while retries < max_retires:
+                try:
+                    return await StandardUrlResolver(self.reddit) \
+                        .resolve(await self.reddit.submission(url = f"https://www.reddit.com{submission.permalink}"))
+                except TimeoutError as timeout_error:
+                    print(f"A TimeoutError occurred while resolving https://www.reddit.com{submission.permalink}: {timeout_error}")
+                    retries += 1
+                except Exception as error:
+                    print(f"An Error occurred while resolving https://www.reddit.com{submission.permalink}: {error}")
+                    return set()
         return set()

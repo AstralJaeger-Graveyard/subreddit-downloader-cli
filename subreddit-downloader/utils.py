@@ -1,6 +1,9 @@
 import json
 import re
+from enum import Enum
 from pathlib import Path
+
+import cdblib
 from colorama import Fore
 
 
@@ -29,3 +32,32 @@ async def store_dupmap(dupmap: dict[str, str], meta_dir: Path):
     with open(dupfile_path, "w") as dupfile:
         json.dump(dupmap, dupfile, indent=2)
 
+
+class StoreModes(Enum):
+    MODE_32 = 1
+    MODE_64 = 2
+
+
+
+
+
+class DuplicateStore(object):
+
+    def __init__(self, meta_folder: Path, name: str, mode: int = 64) -> None:
+        self.meta_folder = meta_folder
+        self.name = name
+        self.store_path = Path(meta_folder, f"store-{name.lower()}.cdb")
+
+
+    def _create_store(self):
+        if not self.store_path.exists():
+            with open(self.store_path, 'wb') as f:
+                with cdblib.Writer(f) as writer:
+                    pass
+
+    def __enter__(self):
+        self._create_store()
+
+
+    def __exit__(self):
+        pass
