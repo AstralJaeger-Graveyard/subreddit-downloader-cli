@@ -9,7 +9,7 @@ import re
 import time
 import typing
 import urllib.parse
-import cdblib
+from asyncio import TaskGroup
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
@@ -22,25 +22,27 @@ from asyncprawcore.exceptions import ResponseException
 from colorama import init, Fore
 
 import environmentlabels as envlbl
-from downloaders import BaseDownloader, GenericDownloader, RedditDownloader, RedgifsDownloader, ImgurDownloader, \
+from downloaders import BaseDownloader, SimpleDownloader, RedditDownloader, RedgifsDownloader, ImgurDownloader, \
+    GfycatDownloader, \
     NoDownloaderException
 from environment import ensure_environment
 from urlresolvers import StandardUrlResolver, CrosspostUrlResolver
-from utils import is_sha256, load_dupmap, store_dupmap
+from utils import SubmissionStore, HEADERS, retry
+from cleanup import cleanup
 
 # Constants
-VERSION = "0.3.0"
-HEADERS = 96
+VERSION = "0.5.0"
 LIMIT = 1000
 
-generic_downloader = GenericDownloader()
+generic_downloader = SimpleDownloader()
 
 # Register downloaders
 used_downloaders = [
     generic_downloader,
     RedditDownloader(),
     RedgifsDownloader(),
-    ImgurDownloader()
+    ImgurDownloader(),
+    GfycatDownloader()
     ]
 
 # Important environment
@@ -48,7 +50,6 @@ env = ensure_environment(used_downloaders)
 downloader_registry: dict[re.Pattern, BaseDownloader] = {}
 
 stats: Counter = Counter()
-dup_map: dict[str, str] = dict()
 
 
 async def download(url: str, target: str) -> (str, Path):
@@ -80,14 +81,14 @@ async def download(url: str, target: str) -> (str, Path):
     raise NoDownloaderException
 
 
-async def handle_text(submission: Submission, target_dir: str, job_id: int) -> None:
+async def handle_text(submission: Submission, subreddit: Subreddit, store: SubmissionStore, target_dir: str, jobid: int) -> None:
     submission_id = submission.id
     score_color = Fore.GREEN if submission.score > 0 else Fore.RED
     title = submission.title
     text = submission.selftext
     author = submission.author
     created = datetime.datetime.fromtimestamp(submission.created_utc)
-    subreddit = submission.subreddit.display_name
+    subreddit = subreddit.display_name
 
     sanitized_title = title.lower() \
         .replace(' ', '_') \
@@ -98,7 +99,7 @@ async def handle_text(submission: Submission, target_dir: str, job_id: int) -> N
 
     filepath = Path(target_dir, filename)
     if filepath.exists():
-        print(f" - {Fore.BLUE}{job_id:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
               f"{submission.title}")
         return
     else:
@@ -111,97 +112,87 @@ async def handle_text(submission: Submission, target_dir: str, job_id: int) -> N
             file.write(f"---{os.linesep}")
             file.write(f"{text}")
 
-    print(f" - {Fore.BLUE}{job_id:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
+    print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
           f"{submission.title} [{filename}]")
-    dup_map.update({submission.id: str(filepath)})
+    store.add_submission(submission, subreddit.display_name)
 
 
-async def handle_url(url: str, submission: Submission, target_dir: str, jobid: int) -> None:
+async def handle_url(url: str, submission: Submission, subreddit: Subreddit, store: SubmissionStore, target_dir: str, jobid: int) -> None:
     score_color = Fore.GREEN if submission.score > 0 else Fore.RED
+    prefix = f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}]"
     try:
         digest, filepath = await download(url, target_dir)
         if digest == "":
-            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
-                  f"{submission.title}")
+            print(f"{prefix} {submission.title}")
         else:
-            print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
-                  f"{submission.title} [{digest}]")
+            print(f"{prefix} {submission.title} [{digest}]")
         # Only add submission if download was successful
-        dup_map.update({submission.id: str(filepath) if filepath is not None else ""})
+        store.add_submission(submission, subreddit.display_name)
     except NoDownloaderException:
-        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
-              f"No downloader for url: {Fore.YELLOW}{url}{Fore.RESET}")
+        print(f"{prefix} No downloader for url: {Fore.YELLOW}{url}{Fore.RESET}")
     except requests.exceptions.HTTPError as http_error:
-        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
-              f"HTTP Error {Fore.YELLOW}{http_error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
+        print(f"{prefix} HTTP Error {Fore.YELLOW}{http_error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
         if hasattr(http_error.response, "status_code") and http_error.response.status_code == 404:
-            dup_map.update({submission.id: ""})  # Data was probably deleted, no need to revisit
+            store.add_submission(submission, subreddit.display_name)  # Data was probably deleted, no need to revisit
     except Exception as error:
-        print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
-              f"Error {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
+        print(f"{prefix} Error {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
 
 
-async def handle_submission(submission: Submission, reddit: Reddit, target_dir: str, jobid: int) -> None:
+async def handle_submission(submission: Submission, subreddit: Subreddit, reddit: Reddit, store: SubmissionStore, target_dir: Path, jobid: int) -> None:
     try:
         if submission.is_self:
-            await handle_text(submission, target_dir, jobid)
+            await handle_text(submission, subreddit, store, target_dir, jobid)
         elif hasattr(submission, "crosspost_parent") and submission.crosspost_parent is not None:
             urls = await CrosspostUrlResolver(reddit).resolve(submission)
             for url in urls:
-                await handle_url(url, submission, target_dir, jobid)
+                await handle_url(url, submission, subreddit, store, target_dir, jobid)
         else:
             urls = await StandardUrlResolver(reddit).resolve(submission)
             for url in urls:
-                await handle_url(url, submission, target_dir, jobid)
+                await handle_url(url, submission, subreddit, store, target_dir, jobid)
     except Exception as error:
         print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. Critical Error {Fore.RED}{error}{Fore.RESET} for submission: " +
               f"{Fore.RED}{submission.permalink}{Fore.RESET}")
         raise error
 
 
+@retry(10)
+async def submission_task_producer(taskgroup: TaskGroup, subreddit: Subreddit, reddit: Reddit,
+                                   store: SubmissionStore, target_dir: Path, start_time: float) -> None:
+    jobid: int = 1  # Actual jobs that get downloaded
+    taskid: int = 1  # Jobs that get checked but have already been downloaded
+    steps = 10 if LIMIT <= 20 else 25
+    reporting_steps = int(math.ceil(LIMIT / steps))
+    async for submission in subreddit.new(limit = LIMIT):
+        if not store.has_submission(submission.id, subreddit.display_name):
+            await submission.load()
+            taskgroup.create_task(handle_submission(submission, subreddit, reddit, store, target_dir, jobid))
+            jobid += 1
+        if taskid % reporting_steps == 0:
+            print(" " * 3 +
+                  f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done." +
+                  f" took {timedelta(seconds = (time.perf_counter() - start_time))} so far{Fore.RESET}")
+        taskid += 1
+
+
 async def handle_subreddit(subreddit: Subreddit, reddit: Reddit, data_dir: Path, meta_dir: Path) -> None:
     start_time = time.perf_counter()
-    target_dir = os.path.join(data_dir, f"ws-{subreddit.display_name.lower()}")
-    os.makedirs(target_dir, exist_ok = True)
+    target_dir = Path(data_dir, f"ws-{subreddit.display_name.lower()}")
+
+    if not target_dir.exists():
+        os.makedirs(target_dir, exist_ok = True)
 
     print("=" * HEADERS)
     print(f"> {Fore.BLUE}Subreddit{Fore.RESET}    : r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
     print(f"> {Fore.BLUE}Target folder{Fore.RESET}: {target_dir}")
     print("=" * HEADERS + os.linesep)
-    max_retries = 10
 
-
-
-    async with asyncio.TaskGroup() as tg :
-        retries: int = 1  # How often it should be retried to download
-        while retries < max_retries:
-            jobid: int = 1  # Actual jobs that get downloaded
-            taskid: int = 1  # Jobs that get checked but have already been downloaded
-            try:
-                steps = 10 if LIMIT <= 20 else 25
-                reporting_steps = int(math.ceil(LIMIT / steps))
-                async for submission in subreddit.new(limit = LIMIT):
-                    if submission.id not in dup_map.keys():
-                        await submission.load()
-                        tg.create_task(handle_submission(submission, reddit, target_dir, jobid))
-                        jobid += 1
-                        if jobid > 10 and jobid % 50 == 0:
-                            tg.create_task(store_dupmap(dup_map, meta_dir))
-                    if taskid % reporting_steps == 0:
-                        print(" " * 3 +
-                              f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done." +
-                              f" took {timedelta(seconds = (time.perf_counter() - start_time))} so far{Fore.RESET}")
-                    taskid += 1
-                retries = max_retries + 1
-            except Exception as error:
-                retries += 1
-                print(f"An {Fore.RED}{error.__class__.__name__}{Fore.RESET} occurred: {error} retrieving " +
-                      f"{max_retries - retries} more times")
+    with SubmissionStore(meta_dir) as store:
+        async with asyncio.TaskGroup() as taskGroup:
+            await submission_task_producer(taskGroup, subreddit, reddit, store, target_dir, start_time)
 
     end_time = time.perf_counter()
-    await store_dupmap(dup_map, meta_dir)
-    print(f"> Downloading subreddit took {Fore.BLUE}{timedelta(seconds = (end_time - start_time))}{Fore.RESET} " +
-          f"Duplicate map contains {Fore.BLUE}{len(dup_map)}{Fore.RESET} elements.")
+    print(f"> Downloading subreddit took {Fore.BLUE}{timedelta(seconds = (end_time - start_time))}{Fore.RESET}")
 
 
 async def prefetch_subreddits(reddit: Reddit, sr_names: list[str]) -> list[Subreddit]:
@@ -271,10 +262,10 @@ async def reddit_handler(environment: dict[str, str]) -> typing.AsyncGenerator:
                 )
     else:
         reddit = Reddit(
-            client_id = environment[envlbl.REDDIT_CLIENT_ID],
-            client_secret = environment[envlbl.REDDIT_CLIENT_SECRET],
-            user_agent = f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
-            )
+                client_id = environment[envlbl.REDDIT_CLIENT_ID],
+                client_secret = environment[envlbl.REDDIT_CLIENT_SECRET],
+                user_agent = f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
+                )
     yield reddit
     await reddit.close()
 
@@ -290,47 +281,11 @@ def build_downloader_registry(downloaders: list[BaseDownloader], no_op: bool = F
     return registry
 
 
-async def cleanup(data_dir: Path, temp_dir: Path) -> None:
-    print(f"> {Fore.BLUE}Cleaning up folder{Fore.RESET}  : {data_dir}")
-    print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
-    print("=" * HEADERS)
-
-    file_map: dict[int, str] = dict()
-
-    for dir_path, dir_names, filenames in os.walk(data_dir):
-        for name in filenames:
-            try:
-                name_path = os.path.join(dir_path, name)
-                filepath = Path(dir_path) / name
-
-                if name.startswith(".") or filepath.suffix == ".xsl":
-                    os.unlink(name_path)
-                elif is_sha256(name):
-                    try:
-                        hex_key = int(name.split(".")[0], 16)
-                        if hex_key in file_map:
-                            if name_path[0:name_path.rfind("/")] == file_map[hex_key]:
-                                print(f" - Found duplicate file: {Fore.YELLOW}{name_path}{Fore.RESET} - " +
-                                      f"{Fore.YELLOW}{file_map[hex_key]}{Fore.RESET}")
-                                os.unlink(name_path)
-                        else:
-                            file_map[hex_key] = name_path
-                        if ".." in name:
-                            print(f" - Renaming malformed file: {Fore.YELLOW}{name}{Fore.RESET} - " +
-                                  f"{Fore.YELLOW}{name.replace('..', '.')}{Fore.RESET}")
-                            os.rename(os.path.join(dir_path, name), os.path.join(dir_path, name.replace("..", ".")))
-                    except ValueError:
-                        pass
-            except FileNotFoundError:
-                pass
-    print(f"File map contained {len(file_map)} elements")
-
-
 def is_supported(url: str, registry: dict[re.Pattern, BaseDownloader]) -> bool:
     return any(p.match(url) is not None for p in registry.keys())
 
 
-def print_reporting(reporting_stats: dict[str, int], registry: dict[str, BaseDownloader]) -> None:
+def print_reporting(reporting_stats: dict[str, int], registry: dict[re.Pattern, BaseDownloader]) -> None:
     """
         Prints a reporting to STDOUT
         Params:
@@ -372,7 +327,7 @@ async def main() -> None:
     print("")
 
     # Initialize argparse
-    global dup_map, LIMIT, downloader_registry
+    global LIMIT, downloader_registry
 
     p_args = parse_args()
     data_dir = Path(p_args.data)
@@ -411,11 +366,7 @@ async def main() -> None:
     # Initialize downloaders with environment
     downloader_registry = build_downloader_registry(used_downloaders, no_op)
 
-    # Load duplicate map
-    dup_map = await load_dupmap(meta_dir)
-
     print("")
-    print(f"> {Fore.BLUE}Duplicate map length{Fore.RESET}: {len(dup_map)}")
     print(f"> {Fore.BLUE}Data folder{Fore.RESET}  : {data_dir}")
     print(f"> {Fore.BLUE}Temp. folder{Fore.RESET} : {temp_dir}")
     print(f"> {Fore.BLUE}Meta. folder{Fore.RESET} : {meta_dir}")
@@ -428,7 +379,6 @@ async def main() -> None:
             await handle_subreddit(sr, reddit, data_dir, meta_dir)
 
     # Store duplicate map
-    await store_dupmap(dup_map, meta_dir)
     print_reporting(stats, downloader_registry)
 
     if not no_cleanup:

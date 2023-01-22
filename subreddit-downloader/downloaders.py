@@ -15,13 +15,13 @@ import fleep
 import requests
 from colorama import Fore
 from requests import Response
-from bs4 import BeautifulSoup
 
 import environmentlabels as envLbl
 
 # This link points to this GitHub Gist that contains a list of regex to websites
-# that can be downloaded with a simple get request, feel free to create your own or extend the existing gist.
-GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/7b620f40144ffaa6e2c48d56b0867594/raw/aa02b347b8d70df0380c923bb8daffe45bab0d29/simple-downloader-regex.txt"
+# that can be downloaded with a simple get request,
+# feel free to create your own or extend the existing gist.
+GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/7b620f40144ffaa6e2c48d56b0867594/raw/5055fb121c5c2e894f8412e613ee196106d61ee8/simple-downloader-regex.txt"
 
 
 class DuplicateFileException(Exception):
@@ -93,9 +93,9 @@ class BaseDownloader:
             Returns:
                 tuple (str, PathLike): A tuple containing file hash and the path as Path to the resulting file
         """
-        with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir=self.environment[envLbl.TEMP_LOCATION]) as tmp_file:
+        with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir = self.environment[envLbl.TEMP_LOCATION]) as tmp_file:
             shagen = sha256()
-            for chunk in response.iter_content(chunk_size=8192):
+            for chunk in response.iter_content(chunk_size = 8192):
                 tmp_file.write(chunk)
                 shagen.update(chunk)
             tmp_file.seek(0)
@@ -126,7 +126,7 @@ class BaseDownloader:
         pass
 
 
-class GenericDownloader(BaseDownloader):
+class SimpleDownloader(BaseDownloader):
     """
         A generic downloader that downloads any file, might not work in most cases
     """
@@ -157,7 +157,7 @@ class RedditDownloader(BaseDownloader):
         return [
             re.compile(r"^i\.redd\.it"),
             re.compile(r"^preview\.redd\.it")
-        ]
+            ]
 
     def get_required_env(self) -> list[str]:
         return []
@@ -189,7 +189,7 @@ class RedgifsDownloader(BaseDownloader):
             re.compile(r"(www\.)?redgifs\.com"),
             re.compile(r"(v\d\.)redgifs\.com"),
             re.compile(r"(i\.)redgifs\.com")
-        ]
+            ]
 
     async def download(self, url, target) -> (str, Path):
         try:
@@ -199,12 +199,12 @@ class RedgifsDownloader(BaseDownloader):
 
         headers = {
             "Authorization": f"Bearer {self.__auth['token']}",
-            "Accept": "application/json"
-        }
-        with self.__session.get(f"https://api.redgifs.com/v2/gifs/{content_id}", headers=headers) as response:
+            "Accept":        "application/json"
+            }
+        with self.__session.get(f"https://api.redgifs.com/v2/gifs/{content_id}", headers = headers) as response:
             response.raise_for_status()
             data = response.json()  # Consider to persist data json somewhere
-            with self.__session.get(data["gif"]["urls"]["hd"], headers=headers, stream=True) as video_response:
+            with self.__session.get(data["gif"]["urls"]["hd"], headers = headers, stream = True) as video_response:
                 return self.save_to_disk(video_response, target)
 
     def _parse_content_id(self, url: str) -> str:
@@ -231,7 +231,7 @@ class ImgurDownloader(BaseDownloader):
         super().init(environment, no_op)
         self.__auth = {
             "Authorization": f"Client-ID {environment[envLbl.IMGUR_CLIENT_ID]} "
-        }
+            }
 
     def get_supported_domains(self) -> list[Pattern]:
         # urls are i.imgur.com or sometimes l.imgur.com
@@ -242,19 +242,19 @@ class ImgurDownloader(BaseDownloader):
 
     async def download(self, url, target) -> (str, Path):
         content_id = self._parse_content_id(url)
-        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers=self.__auth,
-                                stream=True) as data_response:
+        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers = self.__auth,
+                                stream = True) as data_response:
             data_response.raise_for_status()
             data = data_response.json()["data"]
             content_link = data["link"]
             if hasattr(data, "in_gallery") and data["in_gallery"]:
                 print(f"{' ' * 18} URL: {url} is in gallery: {data['in_gallery']}")
-            with self.__session.get(content_link, headers=self.__auth, stream=True) as content_response:
+            with self.__session.get(content_link, headers = self.__auth, stream = True) as content_response:
                 return self.save_to_disk(content_response, target)
 
     def _parse_content_id(self, url: str) -> str:
         """
-            Priave mehtod
+            Private mehtod
             Parses the content ID from an imgur url
             Params:
                 url (str): The url to parse
@@ -262,7 +262,7 @@ class ImgurDownloader(BaseDownloader):
                 content_id (str): The content ID
         """
         if url.startswith("i"):
-            # TODO: Redo this branch, handle image
+            # Redo this branch
             # last_slash_pos = url.rfind("/") + 1
             # dot_pos = url.rfind(".") if "." in url[last_slash_pos:] else len(url)
             # filename = url[last_slash_pos: dot_pos]
@@ -291,16 +291,16 @@ class GfycatDownloader(BaseDownloader):
         self.__session = requests.Session()
         self.__auth_token = ""
         self.__expires_in = ""
-        self.__scope = ""
         self.__token_type = "bearer"
         self.__auth_created = None
+        self.__keys = ["mp4", "webm", "largeGif", "mobile"]
 
     def init(self, environment: dict[str, str], no_op: bool = False) -> None:
         super().init(environment, no_op)
 
     def get_supported_domains(self) -> list[Pattern]:
         # urls are i.imgur.com or sometimes l.imgur.com
-        return [re.compile("([il]\\.)?gfycat\\.com")]
+        return [re.compile(r"^gfycat\.com")]
 
     def get_required_env(self) -> list[str]:
         return [envLbl.GFYCAT_CLIENT_ID, envLbl.GFYCAT_CLIENT_SECRET]
@@ -309,21 +309,11 @@ class GfycatDownloader(BaseDownloader):
         if self.__auth_created is None:
             # Initial authentication
             payload = {
-                    "grant_type": "client_credentials",
-                    "client_id": self.environment[envLbl.GFYCAT_CLIENT_ID],
-                    "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET]
+                "grant_type":    "client_credentials",
+                "client_id":     self.environment[envLbl.GFYCAT_CLIENT_ID],
+                "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET]
                 }
-            with self.__session.post(f"https://api.gfycat.com/v1/oauth/token", json = payload) as response:
-                response.raise_for_status()
-                response_data = response.json()
-                self.__auth_token = response_data["access_token"]
-                self.__expires_in = int(response_data["expires_in"])
-                self.__scope = response_data["scope"]
-                self.__token_type = response_data["token_type"]
-                self.__auth_created = datetime.datetime.now()
-                from pprint import pprint
-                pprint(response_data)
-        if (datetime.datetime.now() - self.__auth_created).seconds >=  self.__expires_in - 10:
+        else:
             # Re-authentication
             payload = {
                 "grant_type":    "refresh",
@@ -331,34 +321,31 @@ class GfycatDownloader(BaseDownloader):
                 "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET],
                 "refresh_token": self.__auth_token
                 }
+
+        if self.__auth_created is None or (datetime.datetime.now() - self.__auth_created).seconds >= self.__expires_in - 10:
             with self.__session.post(f"https://api.gfycat.com/v1/oauth/token", json = payload) as response:
                 response.raise_for_status()
                 response_data = response.json()
                 self.__auth_token = response_data["access_token"]
                 self.__expires_in = int(response_data["expires_in"])
-                self.__scope = response_data["scope"]
                 self.__token_type = response_data["token_type"]
                 self.__auth_created = datetime.datetime.now()
-                from pprint import pprint
-                pprint(response_data)
-
-
 
     async def download(self, url, target) -> (str, Path):
         content_id = await self._parse_content_id(url)
         await self._authenticate()
         headers = {
-                "Authorization": f"{self.__token_type} {self.__auth_token}"
+            "Authorization": f"{self.__token_type} {self.__auth_token}"
             }
-        with self.__session.get(f"https://api.gfycat.com/v1/gfycats/{content_id}", headers=headers,
-                                stream=True) as data_response:
+        with self.__session.get(f"https://api.gfycat.com/v1/gfycats/{content_id}", headers = headers,
+                                stream = True) as data_response:
             data_response.raise_for_status()
-            from pprint import pprint
-            # pprint(data_response.json())
+            content = data_response.json()
 
-            content_link = ""
-            # with self.__session.get(content_link, headers=headers, stream=True) as content_response:
-            #    return self.save_to_disk(content_response, target)
+            content_urls = dict(content["gfyItem"]["content_urls"])
+            url = self._get_download_url(content_urls)
+            with self.__session.get(url, headers = headers) as content_response:
+                return self.save_to_disk(content_response, target)
 
     async def _parse_content_id(self, url: str) -> str:
         """
@@ -369,18 +356,15 @@ class GfycatDownloader(BaseDownloader):
             Returns:
                 content_id (str): The content ID
         """
-        with self.__session.get(url) as response:
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html5lib")
-            from pprint import pprint
-            pprint(soup)
-            print("=" * 100)
-            # Video Player Wrapper element contains links to element containing its id and the video player.
-            vpw = soup.find("div", {"class": "video-player-wrapper"})
-            pprint(vpw)
-
         last_slash_pos = url.rfind("/") + 1
-        return url[last_slash_pos:]
+        first_minus_pos = last_slash_pos + url[last_slash_pos:].find("-") if "-" in url else len(url)
+        return url[last_slash_pos: first_minus_pos]
+
+    def _get_download_url(self, content_urls):
+        for key in self.__keys:
+            if key in content_urls:
+                return content_urls[key]["url"]
 
     def close(self) -> None:
         self.__session.close()
+
