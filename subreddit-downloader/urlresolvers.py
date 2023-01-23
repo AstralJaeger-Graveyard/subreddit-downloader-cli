@@ -35,12 +35,13 @@ class StandardUrlResolver(BaseUrlResolver):
         urls = set()
         if hasattr(submission, "media_metadata") and submission.media_metadata is not None:
             for key, image_item in enumerate(submission.media_metadata.values()):
-                largest_image = image_item['s']
-                keys = {'u', 'mp4', 'gif'}
-                for k in keys:
-                    if k in largest_image:
-                        urls.add(largest_image[k])
-                        break
+                if "s" in image_item:
+                    largest_image = image_item['s']
+                    keys = {'u', 'mp4', 'gif'}
+                    for k in keys:
+                        if k in largest_image:
+                            urls.add(largest_image[k])
+                            break
         elif not submission.is_self and not hasattr(submission, "media_metadata") and "gallery" not in submission.url:
             urls.add(submission.url)
         return urls

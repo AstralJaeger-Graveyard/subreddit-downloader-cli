@@ -1,11 +1,9 @@
 import functools
-import json
 import re
 import sqlite3
-import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from colorama import Fore
 from asyncpraw.models import Submission
 
 HEADERS = 96
@@ -30,7 +28,8 @@ def retry(max_retries = 5):
             retries = 0
             while retries < max_retries:
                 try:
-                    return func(*args, **kwargs)
+                    result = func(*args, **kwargs)
+                    return result
                 except Exception as error:
                     print(f"Error {error} while executing {func.__name__} retrieing {max_retries - retries} more times")
                     retries += 1
@@ -38,26 +37,6 @@ def retry(max_retries = 5):
         return wrapper
 
     return decorator_retry
-
-
-times_store: dict[str, list[int]] = dict()
-
-
-def timeit(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.perf_counter_ns()
-        result = func(*args, **kwargs)
-        delta = time.perf_counter_ns() - start
-
-        if func.__name__ in times_store:
-            times_store.get(func.__name__).append(delta)
-        else:
-            times_store.update({func.__name__: [delta]})
-        average = sum(times_store.get(func.__name__)) / len(times_store.get(func.__name__)) / 1_000_000
-        print(f"Function {func.__name__} Took {delta / 1_000_000:.4f}s AVG: {average:.4f}s")
-        return result
-    return wrapper
 
 
 class SubmissionStore(object):
@@ -85,22 +64,47 @@ class SubmissionStore(object):
             self.connection.execute(f"CREATE TABLE IF NOT EXISTS {table_name}("
                                     "submission_id TEXT PRIMARY KEY, "
                                     "submission_title TEXT NOT NULL, "
-                                    "submission_created_utc INTEGER"
+                                    "submission_created_utc INTEGER,"
+                                    "subreddit TEXT"
                                     ")"
                                     )
             self.connection.commit()
             self.created_cache.add(table_name)
 
-    def add_submission(self, submission: Submission, display_name: str) -> int | None:
-        self.__define_schema(display_name)
-        table_name = self.__get_table_name(display_name)
-        sql = f'''INSERT INTO {table_name}(submission_id, submission_title, submission_created_utc) VALUES(?,?,?)'''
+    def __define_files_schema(self):
+        table_name = "files"
+        if table_name not in self.created_cache:
+            self.connection.execute("CREATE TABLE IF NOT EXISTS files("
+                                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                    "filename TEXT, "
+                                    "submission_id TEXT, "
+                                    "created_at INTEGER, "
+                                    "FOREIGN KEY(submission_id) REFERENCES sr_submissions(submission_id)"
+                                    ")"
+                                    )
+            self.connection.commit()
+            self.created_cache.add(table_name)
+
+    def add_file(self, file_name: str, submission: Submission):
+        self.__define_files_schema()
+        sql = '''INSERT INTO files(filename, submission_id, created_at) VALUES(?,?,?)'''
         cur = self.connection.cursor()
-        cur.execute(sql, (submission.id, submission.title, int(submission.created_utc)))
+        cur.execute(sql,
+                    (file_name, submission.id, int(datetime.now(timezone.utc).timestamp())))
         self.connection.commit()
         return cur.lastrowid
 
-    def has_submission(self, submission_id: str, display_name: str) -> bool:
+    def add_submission(self, submission: Submission, display_name: str = "submissions") -> int | None:
+        self.__define_schema(display_name)
+        table_name = self.__get_table_name(display_name)
+        sql = f'''INSERT INTO {table_name}(submission_id, submission_title, submission_created_utc, subreddit) VALUES(?,?,?, ?)'''
+        cur = self.connection.cursor()
+        cur.execute(sql,
+                    (submission.id, submission.title, int(submission.created_utc), submission.subreddit.display_name))
+        self.connection.commit()
+        return cur.lastrowid
+
+    def has_submission(self, submission_id: str, display_name: str = "submissions") -> bool:
         self.__define_schema(display_name)
         sql = f'''SELECT * FROM {self.__get_table_name(display_name)} WHERE submission_id=?'''
         cur = self.connection.cursor()
@@ -109,8 +113,12 @@ class SubmissionStore(object):
             return True
         return False
 
+    def explicit_commit(self):
+        self.connection.commit()
+
     def __enter__(self):
         return self
 
     def __exit__(self, type, value, traceback):
+        self.connection.commit()
         self.connection.close()

@@ -15,11 +15,13 @@ from datetime import timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import asyncprawcore.exceptions
 import requests
 from asyncpraw import Reddit
 from asyncpraw.models import Submission, Subreddit
 from asyncprawcore.exceptions import ResponseException
 from colorama import init, Fore
+from retry import retry
 
 import environmentlabels as envlbl
 from downloaders import BaseDownloader, SimpleDownloader, RedditDownloader, RedgifsDownloader, ImgurDownloader, \
@@ -27,7 +29,7 @@ from downloaders import BaseDownloader, SimpleDownloader, RedditDownloader, Redg
     NoDownloaderException
 from environment import ensure_environment
 from urlresolvers import StandardUrlResolver, CrosspostUrlResolver
-from utils import SubmissionStore, HEADERS, retry
+from utils import SubmissionStore, HEADERS
 from cleanup import cleanup
 
 # Constants
@@ -52,7 +54,7 @@ downloader_registry: dict[re.Pattern, BaseDownloader] = {}
 stats: Counter = Counter()
 
 
-async def download(url: str, target: str) -> (str, Path):
+async def download(url: str, target: Path, prefix: str = "") -> (str, Path):
     """
         Download a file from an url choosing the correct downloader for the domain
         Params:
@@ -76,9 +78,14 @@ async def download(url: str, target: str) -> (str, Path):
 
     for provider in downloader_registry.keys():
         if re.match(provider, match_str):
-            return await downloader_registry[provider].download(url, target)
+            return await downloader_registry[provider].download(url, target, prefix)
 
     raise NoDownloaderException
+
+
+def store_submission(store: SubmissionStore, submission: Submission) -> None:
+    if not store.has_submission(submission.id):
+        store.add_submission(submission)
 
 
 async def handle_text(submission: Submission, subreddit: Subreddit, store: SubmissionStore, target_dir: str, jobid: int) -> None:
@@ -114,28 +121,34 @@ async def handle_text(submission: Submission, subreddit: Subreddit, store: Submi
 
     print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
           f"{submission.title} [{filename}]")
-    store.add_submission(submission, subreddit.display_name)
+    store_submission(store, submission)
+    store.add_file(filename, submission)
 
 
-async def handle_url(url: str, submission: Submission, subreddit: Subreddit, store: SubmissionStore, target_dir: str, jobid: int) -> None:
+async def handle_url(url: str, submission: Submission, store: SubmissionStore, target_dir: str, jobid: int, file_prefix: str = "") -> None:
     score_color = Fore.GREEN if submission.score > 0 else Fore.RED
     prefix = f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}]"
     try:
-        digest, filepath = await download(url, target_dir)
-        if digest == "":
+        digest, filepath = await download(url, target_dir, file_prefix)
+        if digest == "" and filepath is None:
             print(f"{prefix} {submission.title}")
         else:
             print(f"{prefix} {submission.title} [{digest}]")
+            filepath_str = f"{filepath}"
+            filename = filepath_str[filepath_str.rfind("/"):]
+            store.add_file(filename, submission)
         # Only add submission if download was successful
-        store.add_submission(submission, subreddit.display_name)
+        store_submission(store, submission)
     except NoDownloaderException:
         print(f"{prefix} No downloader for url: {Fore.YELLOW}{url}{Fore.RESET}")
     except requests.exceptions.HTTPError as http_error:
         print(f"{prefix} HTTP Error {Fore.YELLOW}{http_error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
         if hasattr(http_error.response, "status_code") and http_error.response.status_code == 404:
-            store.add_submission(submission, subreddit.display_name)  # Data was probably deleted, no need to revisit
+            store_submission(store, submission)  # Data was probably deleted, no need to revisit
+    except TypeError as type_error:
+        raise type_error
     except Exception as error:
-        print(f"{prefix} Error {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
+        print(f"{prefix} {Fore.RED}{error.__class__.__name__}{Fore.RESET} {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
 
 
 async def handle_submission(submission: Submission, subreddit: Subreddit, reddit: Reddit, store: SubmissionStore, target_dir: Path, jobid: int) -> None:
@@ -145,18 +158,19 @@ async def handle_submission(submission: Submission, subreddit: Subreddit, reddit
         elif hasattr(submission, "crosspost_parent") and submission.crosspost_parent is not None:
             urls = await CrosspostUrlResolver(reddit).resolve(submission)
             for url in urls:
-                await handle_url(url, submission, subreddit, store, target_dir, jobid)
+                await handle_url(url, submission, store, target_dir, jobid)
         else:
             urls = await StandardUrlResolver(reddit).resolve(submission)
+            prefix = submission.id if len(urls) > 1 else ""
             for url in urls:
-                await handle_url(url, submission, subreddit, store, target_dir, jobid)
+                await handle_url(url, submission, store, target_dir, jobid, prefix)
     except Exception as error:
         print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. Critical Error {Fore.RED}{error}{Fore.RESET} for submission: " +
               f"{Fore.RED}{submission.permalink}{Fore.RESET}")
         raise error
 
 
-@retry(10)
+@retry(tries = 10, delay = 10, backoff = 1.5)
 async def submission_task_producer(taskgroup: TaskGroup, subreddit: Subreddit, reddit: Reddit,
                                    store: SubmissionStore, target_dir: Path, start_time: float) -> None:
     jobid: int = 1  # Actual jobs that get downloaded
@@ -164,8 +178,17 @@ async def submission_task_producer(taskgroup: TaskGroup, subreddit: Subreddit, r
     steps = 10 if LIMIT <= 20 else 25
     reporting_steps = int(math.ceil(LIMIT / steps))
     async for submission in subreddit.new(limit = LIMIT):
-        if not store.has_submission(submission.id, subreddit.display_name):
-            await submission.load()
+        if not store.has_submission(submission.id):
+            attempt = 0
+            while attempt < 5:
+                try:
+                    attempt += 1
+                    await submission.load()
+                    break
+                except asyncprawcore.exceptions.RequestException as error:
+                    wait_time = 10 * attempt
+                    print(f"An error occurred {Fore.RED}{error}{Fore.RESET} waiting for {wait_time}s.")
+                    await asyncio.sleep(wait_time)
             taskgroup.create_task(handle_submission(submission, subreddit, reddit, store, target_dir, jobid))
             jobid += 1
         if taskid % reporting_steps == 0:
@@ -173,6 +196,7 @@ async def submission_task_producer(taskgroup: TaskGroup, subreddit: Subreddit, r
                   f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done." +
                   f" took {timedelta(seconds = (time.perf_counter() - start_time))} so far{Fore.RESET}")
         taskid += 1
+    store.explicit_commit()
 
 
 async def handle_subreddit(subreddit: Subreddit, reddit: Reddit, data_dir: Path, meta_dir: Path) -> None:
@@ -205,7 +229,7 @@ async def prefetch_subreddits(reddit: Reddit, sr_names: list[str]) -> list[Subre
             subreddits (list[Subreddit]): A list of loaded, verified subreddit's
     """
 
-    print(f"Preparing Subreddit's for download:")
+    print("Preparing Subreddit's for download:")
     subreddits = list()
     for sr_name in sr_names:
         try:
@@ -237,13 +261,13 @@ def build_subreddit_list(arg_subreddits: list[str], refresh_mode: bool, data_dir
         sr_names = list(arg_subreddits)
 
     if refresh_mode:
-        print(f"No subreddit names passed, looking for existing resources and refreshing existing resources")
+        print("No subreddit names passed, looking for existing resources and refreshing existing resources")
         existing = data_dir.glob("ws-*")
         sr_names += sorted([srn.name.replace("ws-", "") for srn in existing])
     return sr_names
 
 
-def print_progress(subreddits: list[Subreddit], idx: int):
+def print_progress(subreddits: list[Subreddit], idx: int) -> None:
     print(f"> r/{Fore.LIGHTBLUE_EX}{subreddits[idx - 1] if idx > 0 else 'FIRST'}{Fore.RESET} >> " +
           f"r/{Fore.CYAN}{subreddits[idx].display_name}{Fore.RESET} >> " +
           f"r/{Fore.BLUE}{subreddits[idx + 1] if idx + 1 < len(subreddits) else 'LAST'}{Fore.RESET}")
@@ -270,7 +294,7 @@ async def reddit_handler(environment: dict[str, str]) -> typing.AsyncGenerator:
     await reddit.close()
 
 
-def build_downloader_registry(downloaders: list[BaseDownloader], no_op: bool = False):
+def build_downloader_registry(downloaders: list[BaseDownloader], no_op: bool = False) -> dict[re.Pattern, BaseDownloader]:
     registry: dict[re.Pattern, BaseDownloader] = dict()
     for dl in downloaders:
         dl.init(env, no_op)
@@ -322,7 +346,7 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     print("=" * HEADERS)
     print(f"{Fore.MAGENTA}Subreddit CLI Downloader{Fore.RESET} V{VERSION}".center(HEADERS))
-    print(f"Application startup successful, environment loaded".center(HEADERS))
+    print("Application startup successful, environment loaded".center(HEADERS))
     print("=" * HEADERS)
     print("")
 
