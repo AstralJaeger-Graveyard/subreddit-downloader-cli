@@ -45,7 +45,7 @@ used_downloaders = [
     RedgifsDownloader(),
     ImgurDownloader(),
     GfycatDownloader()
-    ]
+]
 
 # Important environment
 env = ensure_environment(used_downloaders)
@@ -88,7 +88,8 @@ def store_submission(store: SubmissionStore, submission: Submission) -> None:
         store.add_submission(submission)
 
 
-async def handle_text(submission: Submission, subreddit: Subreddit, store: SubmissionStore, target_dir: str, jobid: int) -> None:
+async def handle_text(submission: Submission, subreddit: Subreddit, store: SubmissionStore, target_dir: str,
+                      jobid: int) -> None:
     submission_id = submission.id
     score_color = Fore.GREEN if submission.score > 0 else Fore.RED
     title = submission.title
@@ -125,7 +126,8 @@ async def handle_text(submission: Submission, subreddit: Subreddit, store: Submi
     store.add_file(filename, submission)
 
 
-async def handle_url(url: str, submission: Submission, store: SubmissionStore, target_dir: str, jobid: int, file_prefix: str = "") -> None:
+async def handle_url(url: str, submission: Submission, store: SubmissionStore, target_dir: str, jobid: int,
+                     file_prefix: str = "") -> None:
     score_color = Fore.GREEN if submission.score > 0 else Fore.RED
     prefix = f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}]"
     try:
@@ -148,10 +150,12 @@ async def handle_url(url: str, submission: Submission, store: SubmissionStore, t
     except TypeError as type_error:
         raise type_error
     except Exception as error:
-        print(f"{prefix} {Fore.RED}{error.__class__.__name__}{Fore.RESET} {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
+        print(
+            f"{prefix} {Fore.RED}{error.__class__.__name__}{Fore.RESET} {Fore.YELLOW}{error}{Fore.RESET} for url: {Fore.YELLOW}{url}{Fore.RESET}")
 
 
-async def handle_submission(submission: Submission, subreddit: Subreddit, reddit: Reddit, store: SubmissionStore, target_dir: Path, jobid: int) -> None:
+async def handle_submission(submission: Submission, subreddit: Subreddit, reddit: Reddit, store: SubmissionStore,
+                            target_dir: Path, jobid: int) -> None:
     try:
         if submission.is_self:
             await handle_text(submission, subreddit, store, target_dir, jobid)
@@ -170,14 +174,14 @@ async def handle_submission(submission: Submission, subreddit: Subreddit, reddit
         raise error
 
 
-@retry(tries = 10, delay = 10, backoff = 1.5)
+@retry(tries=10, delay=10, backoff=1.5)
 async def submission_task_producer(taskgroup: TaskGroup, subreddit: Subreddit, reddit: Reddit,
                                    store: SubmissionStore, target_dir: Path, start_time: float) -> None:
     jobid: int = 1  # Actual jobs that get downloaded
     taskid: int = 1  # Jobs that get checked but have already been downloaded
     steps = 10 if LIMIT <= 20 else 25
     reporting_steps = int(math.ceil(LIMIT / steps))
-    async for submission in subreddit.new(limit = LIMIT):
+    async for submission in subreddit.new(limit=LIMIT):
         if not store.has_submission(submission.id):
             attempt = 0
             while attempt < 5:
@@ -194,7 +198,7 @@ async def submission_task_producer(taskgroup: TaskGroup, subreddit: Subreddit, r
         if taskid % reporting_steps == 0:
             print(" " * 3 +
                   f"{Fore.CYAN}Progress: approximately {round((taskid / LIMIT) * 100):2}% done." +
-                  f" took {timedelta(seconds = (time.perf_counter() - start_time))} so far{Fore.RESET}")
+                  f" took {timedelta(seconds=(time.perf_counter() - start_time))} so far{Fore.RESET}")
         taskid += 1
     store.explicit_commit()
 
@@ -204,7 +208,7 @@ async def handle_subreddit(subreddit: Subreddit, reddit: Reddit, data_dir: Path,
     target_dir = Path(data_dir, f"ws-{subreddit.display_name.lower()}")
 
     if not target_dir.exists():
-        os.makedirs(target_dir, exist_ok = True)
+        os.makedirs(target_dir, exist_ok=True)
 
     print("=" * HEADERS)
     print(f"> {Fore.BLUE}Subreddit{Fore.RESET}    : r/{Fore.RED}{subreddit.display_name}{Fore.RESET}")
@@ -216,7 +220,7 @@ async def handle_subreddit(subreddit: Subreddit, reddit: Reddit, data_dir: Path,
             await submission_task_producer(taskGroup, subreddit, reddit, store, target_dir, start_time)
 
     end_time = time.perf_counter()
-    print(f"> Downloading subreddit took {Fore.BLUE}{timedelta(seconds = (end_time - start_time))}{Fore.RESET}")
+    print(f"> Downloading subreddit took {Fore.BLUE}{timedelta(seconds=(end_time - start_time))}{Fore.RESET}")
 
 
 async def prefetch_subreddits(reddit: Reddit, sr_names: list[str]) -> list[Subreddit]:
@@ -278,28 +282,29 @@ def print_progress(subreddits: list[Subreddit], idx: int) -> None:
 async def reddit_handler(environment: dict[str, str]) -> typing.AsyncGenerator:
     if environment[envlbl.REDDIT_USERNAME] and environment[envlbl.REDDIT_PASSWORD]:
         reddit = Reddit(
-                client_id = environment[envlbl.REDDIT_CLIENT_ID],
-                client_secret = environment[envlbl.REDDIT_CLIENT_SECRET],
-                username = environment[envlbl.REDDIT_USERNAME],
-                password = environment[envlbl.REDDIT_PASSWORD],
-                user_agent = f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
-                )
+            client_id=environment[envlbl.REDDIT_CLIENT_ID],
+            client_secret=environment[envlbl.REDDIT_CLIENT_SECRET],
+            username=environment[envlbl.REDDIT_USERNAME],
+            password=environment[envlbl.REDDIT_PASSWORD],
+            user_agent=f"{platform.system().lower()}:{envlbl.REDDIT_CLIENT_ID}:{VERSION} (by u/97hilfel)"
+        )
     else:
         reddit = Reddit(
-                client_id = environment[envlbl.REDDIT_CLIENT_ID],
-                client_secret = environment[envlbl.REDDIT_CLIENT_SECRET],
-                user_agent = f"{platform.system().lower()}:sr-downloader-cli:{VERSION} (by u/97hilfel)"
-                )
+            client_id=environment[envlbl.REDDIT_CLIENT_ID],
+            client_secret=environment[envlbl.REDDIT_CLIENT_SECRET],
+            user_agent=f"{platform.system().lower()}:{envlbl.REDDIT_CLIENT_ID}:{VERSION} (by u/97hilfel)"
+        )
     yield reddit
     await reddit.close()
 
 
-def build_downloader_registry(downloaders: list[BaseDownloader], no_op: bool = False) -> dict[re.Pattern, BaseDownloader]:
+def build_downloader_registry(downloaders: list[BaseDownloader], no_op: bool = False) -> dict[
+    re.Pattern, BaseDownloader]:
     registry: dict[re.Pattern, BaseDownloader] = dict()
     for dl in downloaders:
         dl.init(env, no_op)
         print(
-                f"> {Fore.BLUE}{dl.__class__.__name__}{Fore.RESET} supports {len(dl.get_supported_domains())} providers")
+            f"> {Fore.BLUE}{dl.__class__.__name__}{Fore.RESET} supports {len(dl.get_supported_domains())} providers")
         for host_pattern in dl.get_supported_domains():
             registry[host_pattern] = dl
     return registry
@@ -319,7 +324,7 @@ def print_reporting(reporting_stats: dict[str, int], registry: dict[re.Pattern, 
     total_calls = sum(reporting_stats.values())
     print(f"Used providers and cdn's over {total_calls} attempted downloads:")
 
-    for key, value in sorted(reporting_stats.items(), key = lambda item: item[1], reverse = True):
+    for key, value in sorted(reporting_stats.items(), key=lambda item: item[1], reverse=True):
         color = Fore.GREEN if is_supported(key, registry) else Fore.RED
         percentage = round(value / total_calls * 100, 2)
         print(f" - {Fore.BLUE}{key + Fore.RESET:.<48}: {value: 4} <{color}{percentage:4.1f}%{Fore.RESET}>")
@@ -331,15 +336,15 @@ def parse_args() -> argparse.Namespace:
         Returns:
             namespace (argparse.Namespace): The parsed namespace
     """
-    parser = argparse.ArgumentParser(description = f"A Subreddit Downloader V{VERSION} for the CLI", epilog = "")
-    parser.add_argument("subreddits", metavar = "SR", nargs = "*", help = "The subreddit(s) to be downloaded")
-    parser.add_argument("--data", "-d", required = True, action = "store")
-    parser.add_argument("--temp", "-t", required = False, action = "store")
-    parser.add_argument("--meta", "-m", required = False, action = "store")
-    parser.add_argument("--limit", "-l", required = False, action = "store")
-    parser.add_argument("--refresh", "-r", required = False, action = "store_true")
-    parser.add_argument("--no-cleanup", "-nc", required = False, action = "store_true")
-    parser.add_argument("--no-op", "-no", required = False, action = "store_true")
+    parser = argparse.ArgumentParser(description=f"A Subreddit Downloader V{VERSION} for the CLI", epilog="")
+    parser.add_argument("subreddits", metavar="SR", nargs="*", help="The subreddit(s) to be downloaded")
+    parser.add_argument("--data", "-d", required=True, action="store")
+    parser.add_argument("--temp", "-t", required=False, action="store")
+    parser.add_argument("--meta", "-m", required=False, action="store")
+    parser.add_argument("--limit", "-l", required=False, action="store")
+    parser.add_argument("--refresh", "-r", required=False, action="store_true")
+    parser.add_argument("--no-cleanup", "-nc", required=False, action="store_true")
+    parser.add_argument("--no-op", "-no", required=False, action="store_true")
     return parser.parse_args()
 
 
@@ -381,11 +386,11 @@ async def main() -> None:
     env[envlbl.META_LOCATION] = str(meta_dir)
 
     if not data_dir.exists():
-        os.makedirs(data_dir, exist_ok = True)
+        os.makedirs(data_dir, exist_ok=True)
     if not temp_dir.exists():
-        os.makedirs(temp_dir, exist_ok = True)
+        os.makedirs(temp_dir, exist_ok=True)
     if not meta_dir.exists():
-        os.makedirs(meta_dir, exist_ok = True)
+        os.makedirs(meta_dir, exist_ok=True)
 
     # Initialize downloaders with environment
     downloader_registry = build_downloader_registry(used_downloaders, no_op)
@@ -419,4 +424,4 @@ if __name__ == "__main__":
         downloader.close()
 
     elapsed = time.perf_counter() - start
-    print(f"{Fore.BLUE}{__file__}{Fore.RESET} executed in {Fore.BLUE}{timedelta(seconds = elapsed)}{Fore.RESET}.")
+    print(f"{Fore.BLUE}{__file__}{Fore.RESET} executed in {Fore.BLUE}{timedelta(seconds=elapsed)}{Fore.RESET}.")
