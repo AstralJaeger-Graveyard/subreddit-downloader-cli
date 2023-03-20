@@ -3,13 +3,11 @@ import mimetypes
 import os
 import re
 import shutil
-import time
 from hashlib import sha256
 from os import path, PathLike
 from pathlib import Path
 from re import Pattern
 from tempfile import SpooledTemporaryFile
-from urllib.parse import urlparse
 
 import fleep
 import requests
@@ -21,7 +19,9 @@ import environmentlabels as envLbl
 # This link points to this GitHub Gist that contains a list of regex to websites
 # that can be downloaded with a simple get request,
 # feel free to create your own or extend the existing gist.
-GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/7b620f40144ffaa6e2c48d56b0867594/raw/5055fb121c5c2e894f8412e613ee196106d61ee8/simple-downloader-regex.txt"
+GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/" + \
+                              "7b620f40144ffaa6e2c48d56b0867594/raw/3de8022f6a572932327b585841386f786ef28b49/" + \
+                              "simple-downloader-regex.txt"
 
 
 class DuplicateFileException(Exception):
@@ -72,30 +72,32 @@ class BaseDownloader:
         """
         return []
 
-    async def download(self, url: str, target: str | PathLike) -> (str, Path):
+    async def download(self, url: str, target: str | PathLike, prefix: str = "") -> (str, Path):
         """
             Downloads a file from an url and saves it using save_to_disk
             Parameters:
                 url (str): The url to download from
                 target (str | PathLike): The path to the target folder, must exist before calling this method
+                prefix (str): A way to associate gallery posts with each other on disk
             Returns:
                 tuple (str, Path): A tuple containing file hash and the path as Path to the resulting file
         """
         pass
 
-    def save_to_disk(self, response: Response, target: str | PathLike) -> (str, PathLike):
+    def save_to_disk(self, response: Response, target: str | PathLike, prefix: str = "") -> (str, PathLike):
         """
             Saves a requests.Response to a file named as the hash of the file,
             determining the file type by using the mine-type or fleep.
             Parameters:
                 response (Response): The requests.Response to save
                 target (str | PathLike): The path to the target folder, must exist before calling this method
+                prefix (str): A way to associate gallery posts with each other on disk
             Returns:
                 tuple (str, PathLike): A tuple containing file hash and the path as Path to the resulting file
         """
-        with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir = self.environment[envLbl.TEMP_LOCATION]) as tmp_file:
+        with SpooledTemporaryFile(512 * 1025 * 1024, "wb", dir=self.environment[envLbl.TEMP_LOCATION]) as tmp_file:
             shagen = sha256()
-            for chunk in response.iter_content(chunk_size = 8192):
+            for chunk in response.iter_content(chunk_size=8192):
                 tmp_file.write(chunk)
                 shagen.update(chunk)
             tmp_file.seek(0)
@@ -111,7 +113,11 @@ class BaseDownloader:
             if ext is None or ext == "xsl":
                 return digest, None
 
-            filepath = Path(target, f"{digest}.{ext}")
+            filename = f"{digest}.{ext}"
+            if prefix != "":
+                filename = f"{prefix}_{digest[0:round(len(digest) / 2)]}.{ext}"
+
+            filepath = Path(target, filename)
             if path.exists(filepath):
                 return "", filepath
             if not self.no_op:
@@ -139,10 +145,10 @@ class SimpleDownloader(BaseDownloader):
             response.raise_for_status()
             return [re.compile(entry) for entry in response.text.split(os.linesep)]
 
-    async def download(self, url, target) -> (str, Path):
+    async def download(self, url, target, prefix="") -> (str, Path):
         with requests.get(url) as response:
             response.raise_for_status()
-            return self.save_to_disk(response, target)
+            return self.save_to_disk(response, target, prefix)
 
 
 class RedditDownloader(BaseDownloader):
@@ -157,15 +163,15 @@ class RedditDownloader(BaseDownloader):
         return [
             re.compile(r"^i\.redd\.it"),
             re.compile(r"^preview\.redd\.it")
-            ]
+        ]
 
     def get_required_env(self) -> list[str]:
         return []
 
-    async def download(self, url, target) -> (str, Path):
+    async def download(self, url, target, prefix="") -> (str, Path):
         with requests.get(url) as response:
             response.raise_for_status()
-            return self.save_to_disk(response, target)
+            return self.save_to_disk(response, target, prefix)
 
 
 class RedgifsDownloader(BaseDownloader):
@@ -189,9 +195,9 @@ class RedgifsDownloader(BaseDownloader):
             re.compile(r"(www\.)?redgifs\.com"),
             re.compile(r"(v\d\.)redgifs\.com"),
             re.compile(r"(i\.)redgifs\.com")
-            ]
+        ]
 
-    async def download(self, url, target) -> (str, Path):
+    async def download(self, url, target, prefix="") -> (str, Path):
         try:
             content_id = self._parse_content_id(url)
         except IndexError:
@@ -199,13 +205,13 @@ class RedgifsDownloader(BaseDownloader):
 
         headers = {
             "Authorization": f"Bearer {self.__auth['token']}",
-            "Accept":        "application/json"
-            }
-        with self.__session.get(f"https://api.redgifs.com/v2/gifs/{content_id}", headers = headers) as response:
+            "Accept": "application/json"
+        }
+        with self.__session.get(f"https://api.redgifs.com/v2/gifs/{content_id}", headers=headers) as response:
             response.raise_for_status()
             data = response.json()  # Consider to persist data json somewhere
-            with self.__session.get(data["gif"]["urls"]["hd"], headers = headers, stream = True) as video_response:
-                return self.save_to_disk(video_response, target)
+            with self.__session.get(data["gif"]["urls"]["hd"], headers=headers, stream=True) as video_response:
+                return self.save_to_disk(video_response, target, prefix)
 
     def _parse_content_id(self, url: str) -> str:
         if "i.redgifs.com" in url:
@@ -231,26 +237,31 @@ class ImgurDownloader(BaseDownloader):
         super().init(environment, no_op)
         self.__auth = {
             "Authorization": f"Client-ID {environment[envLbl.IMGUR_CLIENT_ID]} "
-            }
+        }
 
     def get_supported_domains(self) -> list[Pattern]:
         # urls are i.imgur.com or sometimes l.imgur.com
-        return [re.compile(r"([il]\.)?imgur\.com")]
+        return [re.compile(r"(i\.)?imgur\.com"),
+                re.compile(r"(l\.)?imgur\.com"),
+                re.compile(r"(www\.)?imgur\.com")]
 
     def get_required_env(self) -> list[str]:
         return [envLbl.IMGUR_CLIENT_ID]
 
-    async def download(self, url, target) -> (str, Path):
+    async def download(self, url, target, prefix="") -> (str, Path):
+        return await self.download_single_image(url, target, prefix)
+
+    async def download_single_image(self, url, target, prefix="") -> (str, Path):
         content_id = self._parse_content_id(url)
-        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers = self.__auth,
-                                stream = True) as data_response:
+        with self.__session.get(f"https://api.imgur.com/3/image/{content_id}", headers=self.__auth,
+                                stream=True) as data_response:
             data_response.raise_for_status()
             data = data_response.json()["data"]
             content_link = data["link"]
             if hasattr(data, "in_gallery") and data["in_gallery"]:
                 print(f"{' ' * 18} URL: {url} is in gallery: {data['in_gallery']}")
-            with self.__session.get(content_link, headers = self.__auth, stream = True) as content_response:
-                return self.save_to_disk(content_response, target)
+            with self.__session.get(content_link, headers=self.__auth, stream=True) as content_response:
+                return self.save_to_disk(content_response, target, prefix)
 
     def _parse_content_id(self, url: str) -> str:
         """
@@ -261,21 +272,12 @@ class ImgurDownloader(BaseDownloader):
             Returns:
                 content_id (str): The content ID
         """
-        if url.startswith("i"):
-            # Redo this branch
-            # last_slash_pos = url.rfind("/") + 1
-            # dot_pos = url.rfind(".") if "." in url[last_slash_pos:] else len(url)
-            # filename = url[last_slash_pos: dot_pos]
-            return ""
-        else:
-            o = urlparse(url)
-            url_path = o.path
-            if url_path.endswith("/"):
-                url_path = url_path[:len(url_path) - 1]
-            id_str: str = url_path[url_path.rfind("/") + 1:]
-            if "." in id_str:
-                return id_str.split(".")[0]
-            return id_str
+        last_slash_pos = url.rfind("/") + 1
+        terminator_pos = url.rfind(".") if "." in url else len(url)
+        return url[last_slash_pos:terminator_pos]
+
+    def _is_gallery_url(self, url: str) -> bool:
+        pass
 
     def close(self) -> None:
         self.__session.close()
@@ -290,7 +292,7 @@ class GfycatDownloader(BaseDownloader):
         super().__init__()
         self.__session = requests.Session()
         self.__auth_token = ""
-        self.__expires_in = ""
+        self.__expires_in = 0
         self.__token_type = "bearer"
         self.__auth_created = None
         self.__keys = ["mp4", "webm", "largeGif", "mobile"]
@@ -309,21 +311,22 @@ class GfycatDownloader(BaseDownloader):
         if self.__auth_created is None:
             # Initial authentication
             payload = {
-                "grant_type":    "client_credentials",
-                "client_id":     self.environment[envLbl.GFYCAT_CLIENT_ID],
+                "grant_type": "client_credentials",
+                "client_id": self.environment[envLbl.GFYCAT_CLIENT_ID],
                 "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET]
-                }
+            }
         else:
             # Re-authentication
             payload = {
-                "grant_type":    "refresh",
-                "client_id":     self.environment[envLbl.GFYCAT_CLIENT_ID],
+                "grant_type": "refresh",
+                "client_id": self.environment[envLbl.GFYCAT_CLIENT_ID],
                 "client_secret": self.environment[envLbl.GFYCAT_CLIENT_SECRET],
                 "refresh_token": self.__auth_token
-                }
+            }
 
-        if self.__auth_created is None or (datetime.datetime.now() - self.__auth_created).seconds >= self.__expires_in - 10:
-            with self.__session.post(f"https://api.gfycat.com/v1/oauth/token", json = payload) as response:
+        if self.__auth_created is None or (
+                datetime.datetime.now() - self.__auth_created).seconds >= self.__expires_in - 10:
+            with self.__session.post("https://api.gfycat.com/v1/oauth/token", json=payload) as response:
                 response.raise_for_status()
                 response_data = response.json()
                 self.__auth_token = response_data["access_token"]
@@ -331,21 +334,21 @@ class GfycatDownloader(BaseDownloader):
                 self.__token_type = response_data["token_type"]
                 self.__auth_created = datetime.datetime.now()
 
-    async def download(self, url, target) -> (str, Path):
+    async def download(self, url, target, prefix="") -> (str, Path):
         content_id = await self._parse_content_id(url)
         await self._authenticate()
         headers = {
             "Authorization": f"{self.__token_type} {self.__auth_token}"
-            }
-        with self.__session.get(f"https://api.gfycat.com/v1/gfycats/{content_id}", headers = headers,
-                                stream = True) as data_response:
+        }
+        with self.__session.get(f"https://api.gfycat.com/v1/gfycats/{content_id}", headers=headers,
+                                stream=True) as data_response:
             data_response.raise_for_status()
             content = data_response.json()
 
             content_urls = dict(content["gfyItem"]["content_urls"])
             url = self._get_download_url(content_urls)
-            with self.__session.get(url, headers = headers) as content_response:
-                return self.save_to_disk(content_response, target)
+            with self.__session.get(url, headers=headers) as content_response:
+                return self.save_to_disk(content_response, target, prefix)
 
     async def _parse_content_id(self, url: str) -> str:
         """
@@ -367,4 +370,3 @@ class GfycatDownloader(BaseDownloader):
 
     def close(self) -> None:
         self.__session.close()
-
