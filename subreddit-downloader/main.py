@@ -103,8 +103,10 @@ async def handle_text(submission: Submission, subreddit: Subreddit, store: Submi
         .replace('-', '_')
     sanitized_title = re.sub(r'\W+', '', sanitized_title)
 
-    filename = f"{submission_id}_{sanitized_title}.md"
+    if len(sanitized_title) > 127:
+        sanitized_title = sanitized_title[:127]
 
+    filename = f"{submission_id}_{sanitized_title}.md"
     filepath = Path(target_dir, filename)
     if filepath.exists():
         print(f" - {Fore.BLUE}{jobid:3}{Fore.RESET}. [{score_color}{submission.score:4}{Fore.RESET}] " +
