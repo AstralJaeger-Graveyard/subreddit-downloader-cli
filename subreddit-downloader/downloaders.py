@@ -19,8 +19,8 @@ import environmentlabels as envLbl
 # This link points to this GitHub Gist that contains a list of regex to websites
 # that can be downloaded with a simple get request,
 # feel free to create your own or extend the existing gist.
-GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/" + \
-                              "7b620f40144ffaa6e2c48d56b0867594/raw/3de8022f6a572932327b585841386f786ef28b49/" + \
+GENERIC_DOWNLOADER_GIST_URL = "https://gist.githubusercontent.com/AstralJaeger/" \
+                              "7b620f40144ffaa6e2c48d56b0867594/raw/c972a8d8fe4e727a05cad8c5261d8078aa1877b9/" \
                               "simple-downloader-regex.txt"
 
 
@@ -277,6 +277,7 @@ class ImgurDownloader(BaseDownloader):
         return url[last_slash_pos:terminator_pos]
 
     def _is_gallery_url(self, url: str) -> bool:
+        # This methods needs to be implemented in order to support imgur galleries
         pass
 
     def close(self) -> None:
