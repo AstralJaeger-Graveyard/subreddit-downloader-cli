@@ -9,7 +9,7 @@ packages = [{include = "subreddit_downloader_cli"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-requests = "^2.28.2"
+requests = "^2.31.0"
 asyncpraw = "^7.6.1"
 colorama = "^0.4.6"
 fleep = "^1.0.1"
